@@ -36,8 +36,10 @@ test('createOnboardingSession resumes an existing email with its old persona and
   assert.match(queries[1].sql, /SELECT session_id, persona_id/i);
   assert.match(queries[2].sql, /DELETE FROM demo_call_verifications/i);
   assert.deepEqual(queries[2].params, ['old-session-1234567890']);
-  assert.match(queries[3].sql, /UPDATE demo_users/i);
-  assert.deepEqual(queries[3].params, ['new-session-1234567890', 'old-session-1234567890']);
+  assert.match(queries[3].sql, /DELETE FROM demo_call_mobile_verifications/i);
+  assert.deepEqual(queries[3].params, ['old-session-1234567890']);
+  assert.match(queries[4].sql, /UPDATE demo_users/i);
+  assert.deepEqual(queries[4].params, ['new-session-1234567890', 'old-session-1234567890']);
   assert.match(queries.at(-1)?.sql ?? '', /^COMMIT/i);
 });
 

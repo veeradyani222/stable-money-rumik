@@ -195,6 +195,40 @@ test('executeStableToolWithContext invokes onReadAccessMobileStepVerified when m
   assert.deepEqual(marks, [persona.mobile_last_4]);
 });
 
+test('executeStableToolWithContext awaits async mobile-step persistence before returning', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  let releasePersistence!: () => void;
+  const persisted = new Promise<void>((resolve) => {
+    releasePersistence = resolve;
+  });
+  let settled = false;
+
+  const resultPromise = executeStableToolWithContext(
+    persona,
+    'verify_read_access',
+    { mobile_last_4: persona.mobile_last_4 },
+    {
+      onReadAccessMobileStepVerified: async () => {
+        await persisted;
+      },
+    },
+  ).then((result) => {
+    settled = true;
+    return result;
+  });
+
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  releasePersistence();
+  const result = await resultPromise;
+
+  assert.equal(result.ok, true);
+  assert.equal(settled, true);
+});
+
 
 test('executeStableTool reads payment reconciliation status with Project.md safe phrasing', () => {
   const persona = getPersonaById('cust_demo_001');

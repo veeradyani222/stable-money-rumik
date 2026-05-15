@@ -38,7 +38,7 @@ export interface StableToolExecutionContext {
   /** Last four digits already matched this persona on this call (server-held demo gate). */
   verifiedMobileLast4?: string | null;
   /** Fired when mobile last four matched and DOB is still required or failed; used to persist the gate. */
-  onReadAccessMobileStepVerified?: (lastFour: string) => void;
+  onReadAccessMobileStepVerified?: (lastFour: string) => void | Promise<void>;
   createSupportTicket?: (args: { issue: string; priority: 'low' | 'medium' | 'high' }) => Promise<StableToolResult>;
   sendSecureLink?: (args: { action: string; fd_id?: string }) => Promise<StableToolResult>;
   /** When true, `executeStableToolWithContext` uses parse-only DOB matching (unit tests). */
@@ -1104,7 +1104,7 @@ export async function executeStableToolWithContext(
     result.data?.mobile_step_verified === true &&
     typeof context.onReadAccessMobileStepVerified === 'function'
   ) {
-    context.onReadAccessMobileStepVerified(persona.mobile_last_4);
+    await context.onReadAccessMobileStepVerified(persona.mobile_last_4);
   }
 
   return result;

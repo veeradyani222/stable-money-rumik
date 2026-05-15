@@ -26,13 +26,26 @@ interface ExistingDemoUserRow {
 function isMissingVerificationTableError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const code = typeof error === 'object' && error ? (error as { code?: unknown }).code : undefined;
-  return code === '42P01' || message.includes('demo_call_verifications');
+  return (
+    code === '42P01' ||
+    message.includes('demo_call_verifications') ||
+    message.includes('demo_call_mobile_verifications')
+  );
 }
 
 async function clearCallVerificationForSession(pool: Queryable, sessionId: string): Promise<void> {
   try {
     await pool.query(
       `DELETE FROM demo_call_verifications
+       WHERE session_id = $1`,
+      [sessionId],
+    );
+  } catch (error) {
+    if (!isMissingVerificationTableError(error)) throw error;
+  }
+  try {
+    await pool.query(
+      `DELETE FROM demo_call_mobile_verifications
        WHERE session_id = $1`,
       [sessionId],
     );

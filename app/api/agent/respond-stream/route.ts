@@ -13,10 +13,10 @@ import { getPool } from '@/lib/db';
 import { buildPersonaFromDemoUserRow } from '@/lib/demo-users';
 import {
   getDemoCallVerifiedFromStore,
-  getDemoCallVerifiedMobileLastFour,
+  getDemoCallVerifiedMobileLastFourFromStore,
   getRequestDemoSessionId,
   markDemoCallVerifiedInStore,
-  markDemoCallVerifiedMobileLastFour,
+  markDemoCallVerifiedMobileLastFourInStore,
 } from '@/lib/session-auth';
 import { createSseWriter } from './sse';
 
@@ -63,8 +63,8 @@ export async function POST(request: Request) {
   try {
     const sessionId = sessionResult.sessionId;
     const callId = (body as { call_id?: unknown }).call_id;
-    const verifiedMobileLast4 = getDemoCallVerifiedMobileLastFour(sessionId, callId);
     const pool = getPool();
+    const verifiedMobileLast4 = await getDemoCallVerifiedMobileLastFourFromStore(pool, sessionId, callId);
     const result = await pool.query(
       `SELECT persona_id, customer_id, name, mobile_last_4, date_of_birth,
         kyc_status, kyc_rejection_reason, kyc_eta, kyc_next_step,
@@ -101,7 +101,7 @@ export async function POST(request: Request) {
                 sendSecureLink: (args) => sendSecureLinkForSession(sessionId, args),
                 verifiedMobileLast4: verifiedMobileLast4 ?? undefined,
                 onReadAccessMobileStepVerified: (lastFour) => {
-                  markDemoCallVerifiedMobileLastFour(sessionId, callId, lastFour);
+                  return markDemoCallVerifiedMobileLastFourInStore(pool, sessionId, callId, lastFour);
                 },
               },
             },

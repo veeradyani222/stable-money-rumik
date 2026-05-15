@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import {
   getDemoCallVerifiedFallbackForTests,
   getDemoCallVerifiedMobileLastFour,
+  getPersistedDemoCallVerifiedMobileLastFour,
   getPersistedDemoCallVerified,
   markDemoCallVerifiedFallbackForTests,
   markDemoCallVerifiedMobileLastFour,
+  markPersistedDemoCallVerifiedMobileLastFour,
   markPersistedDemoCallVerified,
   resetDemoCallStateForTests,
   resolveDemoSessionId,
@@ -98,4 +100,38 @@ test('persisted demo call verification writes an idempotent verified row', async
   assert.match(queries[0].sql, /INSERT INTO demo_call_verifications/);
   assert.match(queries[0].sql, /ON CONFLICT/);
   assert.deepEqual(queries[0].params, ['session-1234567890', 'call-a']);
+});
+
+test('persisted demo call mobile gate reads by session and call id', async () => {
+  const queries: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async <T = Record<string, unknown>>(sql: string, params: unknown[]) => {
+      queries.push({ sql, params });
+      return { rowCount: 1, rows: [{ mobile_last_4: '3210' }] as T[] };
+    },
+  };
+
+  const lastFour = await getPersistedDemoCallVerifiedMobileLastFour(pool, 'session-1234567890', 'call-a');
+
+  assert.equal(lastFour, '3210');
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /FROM demo_call_mobile_verifications/);
+  assert.deepEqual(queries[0].params, ['session-1234567890', 'call-a']);
+});
+
+test('persisted demo call mobile gate writes an idempotent mobile-step row', async () => {
+  const queries: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      queries.push({ sql, params });
+      return { rowCount: 1 };
+    },
+  };
+
+  await markPersistedDemoCallVerifiedMobileLastFour(pool, 'session-1234567890', 'call-a', '3210');
+
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /INSERT INTO demo_call_mobile_verifications/);
+  assert.match(queries[0].sql, /ON CONFLICT/);
+  assert.deepEqual(queries[0].params, ['session-1234567890', 'call-a', '3210']);
 });

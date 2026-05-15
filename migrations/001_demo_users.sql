@@ -70,3 +70,15 @@ CREATE TABLE IF NOT EXISTS demo_call_verifications (
 
 CREATE INDEX IF NOT EXISTS demo_call_verifications_session_idx
   ON demo_call_verifications (session_id);
+
+CREATE TABLE IF NOT EXISTS demo_call_mobile_verifications (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES demo_users(session_id) ON DELETE CASCADE,
+  call_id TEXT NOT NULL,
+  mobile_last_4 TEXT NOT NULL,
+  verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (session_id, call_id)
+);
+
+CREATE INDEX IF NOT EXISTS demo_call_mobile_verifications_session_idx
+  ON demo_call_mobile_verifications (session_id);
