@@ -490,14 +490,14 @@ test('executeStableToolWithContext invokes secure link side effect from context'
         return {
           ok: true,
           summary: '[neutral] premature withdrawal ke liye secure link email bhej diya.',
-          data: { email_sent: true, email_to: 'customer@example.com' },
+          data: { email_pending: true, email_to: 'customer@example.com' },
         };
       },
     },
   );
 
   assert.equal(result.ok, true);
-  assert.equal(result.data?.email_sent, true);
+  assert.equal(result.data?.email_pending, true);
   assert.deepEqual(calls, [{ action: 'premature_withdrawal', fd_id: 'FD-4412' }]);
 });
 
@@ -581,6 +581,127 @@ test('executeStableToolWithContext respects skipAiDobVerification (parse-only pa
     assert.equal(result.ok, true);
     assert.equal(result.data?.verified, true);
     assert.equal(fetchCalls, 0);
+  } finally {
+    if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = priorKey;
+  }
+});
+
+test('executeStableToolWithContext accepts Urdu-script mobile last four when AI matches', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const priorKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'sk-test';
+  const requestBodies: string[] = [];
+  const fetcher: typeof fetch = async (_url, init) => {
+    requestBodies.push(String(init?.body));
+    return new Response(
+      JSON.stringify({
+        output_parsed: { verdict: 'match', extracted_last_four: persona.mobile_last_4, reason: 'Urdu digits matched record.' },
+      }),
+      { status: 200 },
+    );
+  };
+
+  try {
+    const result = await executeStableToolWithContext(
+      persona,
+      'verify_read_access',
+      { mobile_last_4: 'ڈبل ون ٹو تھری' },
+      { fetcher },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.mobile_step_verified, true);
+    assert.equal(result.data?.verification_step, 'dob_required');
+    assert.equal(requestBodies.length, 1);
+    assert.match(requestBodies[0]!, /ڈبل ون ٹو تھری/);
+  } finally {
+    if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = priorKey;
+  }
+});
+
+test('executeStableToolWithContext rejects mobile last four when AI returns no_match with different digits', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const priorKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'sk-test';
+  const fetcher: typeof fetch = async () =>
+    new Response(
+      JSON.stringify({
+        output_parsed: { verdict: 'no_match', extracted_last_four: '9999', reason: 'Different four digits.' },
+      }),
+      { status: 200 },
+    );
+
+  try {
+    const result = await executeStableToolWithContext(
+      persona,
+      'verify_read_access',
+      { mobile_last_4: 'nine nine nine nine' },
+      { fetcher },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.data?.mobile_step_verified, false);
+    assert.equal(result.data?.verification_step, 'mobile_last_4_required');
+  } finally {
+    if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = priorKey;
+  }
+});
+
+test('executeStableToolWithContext skips AI mobile path when args already contain four digits', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const priorKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'sk-test';
+  let mobileFetchCalls = 0;
+  const fetcher: typeof fetch = async () => {
+    mobileFetchCalls += 1;
+    return new Response(JSON.stringify({ output_parsed: { verdict: 'match', extracted_last_four: persona.mobile_last_4, reason: 'fast path' } }), { status: 200 });
+  };
+
+  try {
+    const result = await executeStableToolWithContext(
+      persona,
+      'verify_read_access',
+      { mobile_last_4: persona.mobile_last_4 },
+      { fetcher },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.mobile_step_verified, true);
+    assert.equal(mobileFetchCalls, 0);
+  } finally {
+    if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = priorKey;
+  }
+});
+
+test('executeStableToolWithContext respects skipAiMobileVerification (parse-only path)', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const priorKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'sk-test';
+  let mobileFetchCalls = 0;
+  const fetcher: typeof fetch = async () => {
+    mobileFetchCalls += 1;
+    return new Response(JSON.stringify({ output_parsed: { verdict: 'match', extracted_last_four: persona.mobile_last_4, reason: 'x' } }), { status: 200 });
+  };
+
+  try {
+    const result = await executeStableToolWithContext(
+      persona,
+      'verify_read_access',
+      { mobile_last_4: 'one two three four' },
+      { fetcher, skipAiMobileVerification: true, skipAiDobVerification: true },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.data?.verification_step, 'mobile_last_4_required');
+    assert.equal(mobileFetchCalls, 0);
   } finally {
     if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = priorKey;

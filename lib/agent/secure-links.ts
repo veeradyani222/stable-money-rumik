@@ -15,6 +15,12 @@ export interface SendSecureLinkOptions {
   sendEmail?: (message: GmailMessageInput) => Promise<GmailSendResult>;
 }
 
+function logSecureLinkEmail(
+  _event: 'email_send_succeeded' | 'email_send_failed',
+  _details: Record<string, unknown>,
+): void {
+}
+
 function clean(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -75,8 +81,20 @@ export async function sendSecureLinkForSession(
 
   const secureUrl = secureActionUrl(sessionId, link, options.appBaseUrl);
   const mailer = options.sendEmail ?? sendGmailMessage;
-
   const actionTitle = spokenStatus(link.action);
+
+  const updatedLink: SecureLinkSeed = {
+    ...link,
+    status: 'sent',
+  };
+  const updatedLinks = links.map((item) => (item === link ? updatedLink : item));
+  await pool.query(
+    `UPDATE demo_users
+     SET secure_links = $2::jsonb
+     WHERE session_id = $1`,
+    [sessionId, JSON.stringify(updatedLinks)],
+  );
+
   const title = `Secure Link: <span style="text-transform: capitalize;">${actionTitle}</span>`;
   const htmlContent = `
     <p>Hi ${row.email},</p>
@@ -90,7 +108,7 @@ export async function sendSecureLinkForSession(
     <p>Best,<br>Stable Assist</p>
   `;
 
-  const email = await mailer({
+  const emailMessage: GmailMessageInput = {
     to: row.email,
     subject: `Secure link for ${actionTitle}`,
     text: [
@@ -109,34 +127,39 @@ export async function sendSecureLinkForSession(
       .filter(Boolean)
       .join('\n'),
     html: renderEmailTemplate(title, htmlContent),
-  });
-
-  const updatedLink: SecureLinkSeed = {
-    ...link,
-    status: email.sent ? 'sent' : link.status,
   };
-  const updatedLinks = links.map((item) => (item === link ? updatedLink : item));
-  if (email.sent) {
-    await pool.query(
-      `UPDATE demo_users
-       SET secure_links = $2::jsonb
-       WHERE session_id = $1`,
-      [sessionId, JSON.stringify(updatedLinks)],
-    );
-  }
+
+  void mailer(emailMessage)
+    .then((email) => {
+      logSecureLinkEmail(email.sent ? 'email_send_succeeded' : 'email_send_failed', {
+        session_id: sessionId,
+        action: link.action,
+        fd_id: link.fd_id,
+        to: email.to,
+        ...(email.error ? { error: email.error } : {}),
+      });
+    })
+    .catch((error) => {
+      logSecureLinkEmail('email_send_failed', {
+        session_id: sessionId,
+        action: link.action,
+        fd_id: link.fd_id,
+        to: row.email,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+
+  const summary = `[neutral] ${actionTitle} ke liye secure link tayyar hai. Confirmation email thodi der mein aa jayega. Yeh action voice par complete nahi hota.`;
 
   return {
     ok: true,
-    summary: email.sent
-      ? `[neutral] ${spokenStatus(link.action)} ke liye secure link email bhej diya. Yeh action voice par complete nahi hota.`
-      : `[neutral] ${spokenStatus(link.action)} ke liye secure link ready hai, par email abhi nahi bhej paayi. Yeh action voice par complete nahi hota.`,
+    summary,
     data: {
       ...updatedLink,
       secure_url: secureUrl,
       voice_execution_allowed: false,
-      email_sent: email.sent,
-      email_to: email.to,
-      ...(email.error ? { email_error: email.error } : {}),
+      email_pending: true,
+      email_to: row.email,
     },
   };
 }

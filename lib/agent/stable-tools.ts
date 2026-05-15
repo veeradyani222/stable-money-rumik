@@ -1,4 +1,5 @@
 import { matchCallerDobWithPersonaAi } from '@/lib/agent/dob-verification-ai';
+import { matchCallerMobileLastFourAi } from '@/lib/agent/mobile-verification-ai';
 import { parseCallerDobToIsoDate } from '@/lib/caller-dob-parse';
 import type { FixedDepositSeed, PaymentSeed, PersonaSeed } from '@/lib/personas';
 import {
@@ -43,7 +44,9 @@ export interface StableToolExecutionContext {
   sendSecureLink?: (args: { action: string; fd_id?: string }) => Promise<StableToolResult>;
   /** When true, `executeStableToolWithContext` uses parse-only DOB matching (unit tests). */
   skipAiDobVerification?: boolean;
-  /** Optional fetch override for AI DOB verification (tests). */
+  /** When true, `executeStableToolWithContext` uses parse-only mobile-last-four matching (unit tests). */
+  skipAiMobileVerification?: boolean;
+  /** Optional fetch override for AI DOB and mobile verification (tests). */
   fetcher?: typeof fetch;
 }
 
@@ -53,10 +56,11 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
     description: 'Verify Tier B read access using the fallback mobile last four plus date of birth flow.',
     authTier: 'Tier B',
     parameters: {
-      mobile_last_4: 'Last four digits of the registered mobile number',
+      mobile_last_4:
+        'Last four digits of the registered mobile number as the caller said it (verbatim is fine, any language or script, e.g. "1123", "double one two three", "ek ek do teen", "ون ون ٹو تھری", "ڈبل ون ٹو تھری"). The server extracts the four digits semantically and falls back to strict digit parsing.',
       date_of_birth: {
         description:
-          'Date of birth as the caller said or typed (verbatim is fine). The server compares meaning to the verified account record when configured, and falls back to strict calendar parsing.',
+          'Date of birth as the caller said or typed (verbatim is fine, any language or script). The server compares meaning to the verified account record when configured, and falls back to strict calendar parsing.',
         optional: true,
       },
     },
@@ -420,12 +424,77 @@ function verifyReadAccess(
   return verifyDobAgainstPersonaDeterministic(persona, phase.raw);
 }
 
+/**
+ * Wrap the deterministic mobile phase with an AI-first extraction step so the
+ * caller can speak the last four digits in any language or script (English,
+ * Hindi, Hinglish, Urdu, Arabic script, Devanagari, "double one two three",
+ * "ڈبل ون ٹو تھری", "ek ek do teen", etc.). Falls back to the original
+ * deterministic phase when AI is disabled or the model cannot decide.
+ */
+async function verifyReadAccessMobilePhaseAi(
+  persona: PersonaSeed,
+  args: Record<string, unknown>,
+  context: StableToolExecutionContext,
+): Promise<VerifyReadMobilePhase> {
+  const gateLast4 =
+    typeof context.verifiedMobileLast4 === 'string' ? digitsOnly(context.verifiedMobileLast4).slice(-4) : '';
+  const rawMobileArg = args.mobile_last_4 == null ? '' : String(args.mobile_last_4).trim();
+  const directDigits = digitsOnly(rawMobileArg).slice(-4);
+
+  if (rawMobileArg && directDigits.length === 4) {
+    return verifyReadAccessMobilePhase(persona, args, context);
+  }
+
+  if (!rawMobileArg && gateLast4 === persona.mobile_last_4) {
+    return verifyReadAccessMobilePhase(persona, args, context);
+  }
+
+  if (!rawMobileArg) {
+    return verifyReadAccessMobilePhase(persona, args, context);
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  const useAi =
+    !context.skipAiMobileVerification &&
+    process.env.STABLE_DISABLE_AI_MOBILE !== '1' &&
+    Boolean(apiKey);
+
+  if (!useAi) {
+    return verifyReadAccessMobilePhase(persona, args, context);
+  }
+
+  const ai = await matchCallerMobileLastFourAi({
+    apiKey: apiKey!,
+    callerUtterance: rawMobileArg,
+    recordLastFour: persona.mobile_last_4,
+    fetcher: context.fetcher,
+  });
+
+  if (ai.verdict === 'match') {
+    return verifyReadAccessMobilePhase(
+      persona,
+      { ...args, mobile_last_4: persona.mobile_last_4 },
+      context,
+    );
+  }
+
+  if (ai.verdict === 'no_match' && ai.extractedLastFour) {
+    return verifyReadAccessMobilePhase(
+      persona,
+      { ...args, mobile_last_4: ai.extractedLastFour },
+      context,
+    );
+  }
+
+  return verifyReadAccessMobilePhase(persona, args, context);
+}
+
 async function verifyReadAccessWithAi(
   persona: PersonaSeed,
   args: Record<string, unknown>,
   context: StableToolExecutionContext,
 ): Promise<StableToolResult> {
-  const phase = verifyReadAccessMobilePhase(persona, args, context);
+  const phase = await verifyReadAccessMobilePhaseAi(persona, args, context);
   if (phase.kind === 'terminal') return phase.result;
 
   const raw = phase.raw;

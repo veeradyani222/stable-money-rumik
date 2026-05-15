@@ -341,7 +341,7 @@ test('agent prompt and tool declarations require real email side effects for tic
   assert.match(request.instructions, /call create_support_ticket/i);
   assert.match(request.instructions, /complaints, escalations, grievances/i);
   assert.match(request.instructions, /call send_secure_link/i);
-  assert.match(request.instructions, /Do not say an email was sent unless/i);
+  assert.match(request.instructions, /send_secure_link succeeds with email_pending: true/i);
   assert.match(request.instructions, /email_pending: true/i);
   assert.match(request.instructions, /Confirmation email thodi der mein aa jayega/i);
 });
@@ -757,6 +757,7 @@ test('runStableAgent executes verification without console logging', async () =>
       persona,
       transcript: '1991-08-14',
       history: [],
+      toolContext: { verifiedMobileLast4: '3210' },
     });
 
     assert.equal(result.verified, true);
@@ -1931,6 +1932,7 @@ test('streamStableAgentText fills empty DOB verification args from the current t
           { role: 'user', text: '3210' },
           { role: 'model', text: '[neutral] Kripya date of birth batayein.' },
         ],
+        toolContext: { verifiedMobileLast4: '3210' },
       },
       () => {},
       (event) => {
@@ -2023,6 +2025,7 @@ test('streamStableAgentText continues from successful DOB verification to FD sum
           { role: 'model', text: '[neutral] Mobile last four match ho gaya. Apni date of birth batayein.' },
         ],
         route: testRoute('fd.summary'),
+        toolContext: { verifiedMobileLast4: '3210' },
       },
       (delta) => chunks.push(delta),
     );

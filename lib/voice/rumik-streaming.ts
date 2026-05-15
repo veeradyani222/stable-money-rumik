@@ -2,7 +2,7 @@ export interface RumikChunkBuffer {
   pending: string;
 }
 
-const MIN_COMMA_CHUNK_CHARS = 36;
+const MIN_COMMA_CHUNK_CHARS = 24;
 const MAX_CHUNK_CHARS = 100;
 const STRONG_BOUNDARY_PATTERN = /[.!?]\s+/;
 

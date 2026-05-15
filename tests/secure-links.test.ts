@@ -46,9 +46,11 @@ test('sendSecureLinkForSession emails a matching secure link and marks it sent',
     },
   );
 
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   assert.equal(result.ok, true);
-  assert.match(result.summary, /secure link email bhej diya/i);
-  assert.equal(result.data?.email_sent, true);
+  assert.match(result.summary, /Confirmation email thodi der mein aa jayega/i);
+  assert.equal(result.data?.email_pending, true);
   assert.equal(result.data?.email_to, 'customer@example.com');
   assert.equal(result.data?.status, 'sent');
   assert.equal(result.data?.secure_url, 'https://demo.stable.test/secure-action?session_id=demo-session-1234567890&action=premature_withdrawal&fd_id=FD-4412');
@@ -59,6 +61,92 @@ test('sendSecureLinkForSession emails a matching secure link and marks it sent',
   assert.match(emails[0]?.subject ?? '', /Secure link for premature withdrawal/i);
   assert.match(emails[0]?.text ?? '', /FD-4412/);
   assert.match(emails[0]?.text ?? '', /15 minutes/);
+});
+
+test('sendSecureLinkForSession returns before the confirmation email finishes sending', async () => {
+  let finishEmail!: (result: GmailSendResult) => void;
+  const emailPromise = new Promise<GmailSendResult>((resolve) => {
+    finishEmail = resolve;
+  });
+  const secureLinks: SecureLinkSeed[] = [
+    {
+      action: 'premature_withdrawal',
+      fd_id: 'FD-4412',
+      status: 'ready_to_send',
+      expires_in: '15 minutes',
+    },
+  ];
+  const pool = {
+    query: async <T = Record<string, unknown>>(sql: string) => {
+      if (/SELECT email, secure_links/i.test(sql)) {
+        return queryResult([{ email: 'customer@example.com', secure_links: secureLinks }] as unknown as T[]);
+      }
+      return queryResult([] as T[], 0);
+    },
+  };
+
+  const linkPromise = sendSecureLinkForSession(
+    'demo-session-1234567890',
+    { action: 'premature_withdrawal', fd_id: 'FD-4412' },
+    {
+      pool,
+      sendEmail: async () => emailPromise,
+    },
+  );
+
+  const raced = await Promise.race([
+    linkPromise.then((result) => ({ type: 'result' as const, result })),
+    new Promise<{ type: 'timeout' }>((resolve) => {
+      setTimeout(() => resolve({ type: 'timeout' }), 20);
+    }),
+  ]);
+
+  finishEmail({ sent: true, to: 'customer@example.com' });
+
+  assert.equal(raced.type, 'result');
+  if (raced.type === 'result') {
+    assert.equal(raced.result.ok, true);
+    assert.equal(raced.result.data?.email_pending, true);
+  }
+});
+
+test('sendSecureLinkForSession handles background email failures without delaying the secure link', async () => {
+  const secureLinks: SecureLinkSeed[] = [
+    {
+      action: 'premature_withdrawal',
+      fd_id: 'FD-4412',
+      status: 'ready_to_send',
+      expires_in: '15 minutes',
+    },
+  ];
+  const pool = {
+    query: async <T = Record<string, unknown>>(sql: string) => {
+      if (/SELECT email, secure_links/i.test(sql)) {
+        return queryResult([{ email: 'customer@example.com', secure_links: secureLinks }] as unknown as T[]);
+      }
+      return queryResult([] as T[], 0);
+    },
+  };
+
+  const result = await sendSecureLinkForSession(
+    'demo-session-1234567890',
+    { action: 'premature_withdrawal', fd_id: 'FD-4412' },
+    {
+      pool,
+      sendEmail: async (): Promise<GmailSendResult> => ({
+        sent: false,
+        to: 'customer@example.com',
+        error: 'Gmail configuration is missing.',
+      }),
+    },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.ok, true);
+  assert.match(result.summary, /Confirmation email thodi der mein aa jayega/i);
+  assert.equal(result.data?.email_pending, true);
+  assert.equal(result.data?.status, 'sent');
 });
 
 test('sendSecureLinkForSession does not email when no matching ready secure link exists', async () => {

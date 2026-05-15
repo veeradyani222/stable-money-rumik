@@ -37,8 +37,13 @@ function getDobVerificationModel(): string {
     process.env.OPENAI_DO_VERIFICATION_MODEL ||
     process.env.OPENAI_INTENT_MODEL ||
     process.env.OPENAI_AGENT_MODEL ||
-    'gpt-5-mini'
+    'gpt-4o-mini'
   );
+}
+
+function isReasoningModel(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.startsWith('gpt-5') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4');
 }
 
 function extractOpenAiJsonText(response: OpenAiDobResponse): string {
@@ -95,8 +100,9 @@ export async function matchCallerDobWithPersonaAi(input: DobAiMatchInput): Promi
   const utterance = input.callerUtterance.trim();
   if (!utterance) return { verdict: 'unclear', modelAnswered: false };
 
+  const dobModel = getDobVerificationModel();
   const body = {
-    model: getDobVerificationModel(),
+    model: dobModel,
     input: [
       {
         role: 'user',
@@ -119,7 +125,7 @@ export async function matchCallerDobWithPersonaAi(input: DobAiMatchInput): Promi
     ].join('\n'),
     max_output_tokens: 8000,
     stream: false,
-    reasoning: { effort: 'low' },
+    ...(isReasoningModel(dobModel) ? { reasoning: { effort: 'low' } } : {}),
     prompt_cache_key: 'stable-dob-verification-v1',
     text: {
       format: {

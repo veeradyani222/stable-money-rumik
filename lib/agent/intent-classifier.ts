@@ -96,7 +96,12 @@ const INTENT_CLASSIFICATION_GUIDE: Record<StableIntentId, string> = {
   unknown: 'Unrelated, too unclear, or not enough information to choose a Stable Money support intent.',
 };
 function getIntentClassifierModel(): string {
-  return process.env.OPENAI_INTENT_MODEL || process.env.OPENAI_AGENT_MODEL || 'gpt-5-mini';
+  return process.env.OPENAI_INTENT_MODEL || process.env.OPENAI_AGENT_MODEL || 'gpt-4o-mini';
+}
+
+function isReasoningModel(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.startsWith('gpt-5') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4');
 }
 
 function cacheKey(input: Pick<IntentClassifierInput, 'transcript' | 'history'>): string {
@@ -202,8 +207,9 @@ function buildClassifierRequestBody(
   input: IntentClassifierInput,
   options: { maxOutputTokens: number },
 ): Record<string, unknown> {
+  const model = getIntentClassifierModel();
   return {
-    model: getIntentClassifierModel(),
+    model,
     input: [
       {
         role: 'user',
@@ -229,7 +235,7 @@ function buildClassifierRequestBody(
     ].join('\n'),
     max_output_tokens: options.maxOutputTokens,
     stream: false,
-    reasoning: { effort: 'low' },
+    ...(isReasoningModel(model) ? { reasoning: { effort: 'low' } } : {}),
     prompt_cache_key: 'stable-intent-classifier-v1',
     text: {
       format: {

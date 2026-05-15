@@ -34,6 +34,7 @@ export interface BuildOpenAIResponseRequestInput {
     onReadAccessMobileStepVerified?: StableToolExecutionContext['onReadAccessMobileStepVerified'];
   };
   skipAiDobVerification?: boolean;
+  skipAiMobileVerification?: boolean;
 }
 
 interface OpenAIInputMessage {
@@ -174,7 +175,25 @@ function toolParameters(parameters: Record<string, unknown>): OpenAITool['parame
 }
 
 function getAgentModel(): string {
-  return process.env.OPENAI_AGENT_MODEL || 'gpt-5-mini';
+  return process.env.OPENAI_AGENT_MODEL || 'gpt-4o-mini';
+}
+
+/**
+ * gpt-5 / o1 / o3 / o4 are reasoning models and accept the `reasoning` and
+ * `text.verbosity` Responses-API fields. Non-reasoning models reject these
+ * with a 400, so we only attach them when the active model supports them.
+ */
+function isReasoningModel(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.startsWith('gpt-5') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4');
+}
+
+function reasoningFieldsForModel(model: string): { reasoning?: { effort: 'low' }; text?: { verbosity: 'low' } } {
+  if (!isReasoningModel(model)) return {};
+  return {
+    reasoning: { effort: 'low' },
+    text: { verbosity: 'low' },
+  };
 }
 
 function defaultRoute(): StableIntentRoute {
@@ -197,10 +216,9 @@ function isMobileLastFourFollowUp(transcript: string, history: AgentHistoryMessa
   return /last four|last chaar|chaar digits/i.test(lastModelText(history));
 }
 
-function isDobVerificationInProgress(history: AgentHistoryMessage[], toolContext?: BuildOpenAIResponseRequestInput['toolContext']): boolean {
-  if (toolContext?.verifiedMobileLast4) return true;
-  const tail = history.slice(-6).map((m) => m.text).join('\n');
-  return /mobile last four match|date of birth match nahi|date of birth|DOB/i.test(tail);
+function isDobVerificationInProgress(toolContext?: BuildOpenAIResponseRequestInput['toolContext']): boolean {
+  const gate = toolContext?.verifiedMobileLast4?.trim() ?? '';
+  return gate.length === 4;
 }
 
 function isSupportTicketIssueAnswer(history: AgentHistoryMessage[]): boolean {
@@ -324,7 +342,7 @@ function buildTieredRouteInstructions(input: {
     lines.push('Verification is already in progress after mobile_step_verified.');
     lines.push('The verify_read_access tool may set mobile_step_verified in its tool data; respect that gate before asking for date of birth again.');
     lines.push('call verify_read_access again with the same matched mobile last four and the latest date of birth answer.');
-    if (isDobVerificationInProgress(history, toolContext) && !/^\d{4}$/.test(transcript.trim())) {
+    if (isDobVerificationInProgress(toolContext)) {
       lines.push('Treat the latest caller turn as the date of birth answer.');
     }
   }
@@ -359,6 +377,16 @@ function buildTieredRouteInstructions(input: {
     lines.push('Never say DOB aloud; say date of birth in full words.');
     lines.push('Apni date of birth batayein in natural conversational Hinglish.');
     lines.push('Never ask for a specific date format, Y words, rigid separators, or digit-heavy templates.');
+    lines.push(
+      'Accept the caller\'s answer in any language or script (English, Hindi, Hinglish, Urdu, Arabic, Devanagari, mixed code-switching, words like "double", "triple", "ek do teen char", "ون ون ٹو تھری", "ڈبل ون ٹو تھری").',
+    );
+    lines.push(
+      'Never tell the caller to repeat in a specific script, in Roman, in English, in numerals, or in any particular format. The server handles extraction.',
+    );
+    lines.push(
+      'When the caller answers, always call verify_read_access. Pass the caller\'s verbatim utterance as mobile_last_4 (or as date_of_birth in the DOB phase) if you cannot confidently decode the digits or date yourself. The server will semantically match it against the record.',
+    );
+    lines.push('Do not silently stall ("ek minute dijiye", "main check karti hoon") instead of calling verify_read_access when the caller has answered the verification prompt.');
     lines.push("Remember the caller's original question and return to it after verification.");
     lines.push('After verification, answer the original request using the allowed account tool.');
   }
@@ -411,8 +439,7 @@ function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, t
     'If the caller gives the ticket issue, briefly acknowledge before tool use: Main samajh gayi, main support ticket create kar deti hoon.',
     'After create_support_ticket succeeds with email_pending: true, say only: Support ticket create ho gaya hai. Confirmation email thodi der mein aa jayega.',
     'For Tier C secure actions, after required verification and any quote or status check, call send_secure_link.',
-    'Do not say an email was sent unless the tool result data says email_sent: true.',
-    'If a secure link tool returns email_sent: false, say the link is ready but email abhi nahi bhej paayi.',
+    'After send_secure_link succeeds with email_pending: true, use the tool summary as-is; it already tells the caller the confirmation email will arrive shortly.',
     'Payment reassurance phrases you may use when payment is stressful (Roman script, Hinglish): aapka paisa safe hai; worst case mein refund mil jayega, koi loss nahi hoga.',
     `Money anxiety acknowledgement line (Hinglish, use when payment callers sound stressed): Main samajh sakti hoon ki aap pareshan hain. Main abhi status check karke batati hoon.`,
     `FD rate compare line (English, speak in Hinglish naturally): ${PROJECT_EXACT_LINES.rateCompare}`,
@@ -479,14 +506,14 @@ export function buildOpenAIResponseRequest(input: BuildOpenAIResponseRequestInpu
 
   const messages = compactHistoryWithTranscript(input.history, input.transcript);
 
+  const model = getAgentModel();
   return {
-    model: getAgentModel(),
+    model,
     instructions: buildStableAgentInstructions(input, toolNames),
     input: historyToOpenAiInputs(messages),
     tools: declarations.length > 0 ? declarations : undefined,
     max_output_tokens: AGENT_INITIAL_MAX_OUTPUT_TOKENS,
-    reasoning: { effort: 'low' },
-    text: { verbosity: 'low' },
+    ...reasoningFieldsForModel(model),
   };
 }
 
@@ -551,98 +578,43 @@ function isPaymentReconciliationTool(name: string): boolean {
   return name === 'get_payment_reconciliation_status';
 }
 
-function spokenLastFourToDigits(text: string): string | null {
-  const trimmed = text.trim();
-  if (/^\d{4}$/.test(trimmed)) return trimmed;
-
-  const lower = text.toLowerCase();
-  const wordMap: Record<string, string> = {
-    zero: '0',
-    one: '1',
-    two: '2',
-    three: '3',
-    four: '4',
-    five: '5',
-    six: '6',
-    seven: '7',
-    eight: '8',
-    nine: '9',
-  };
-
-  if (!/double|triple/i.test(lower)) return null;
-
-  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
-  let out = '';
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    if (token === 'double') {
-      const next = tokens[i + 1];
-      const digit = wordMap[next ?? ''] ?? (next && /^\d$/.test(next) ? next : '');
-      if (digit) out += digit + digit;
-    } else if (token === 'triple') {
-      const next = tokens[i + 1];
-      const digit = wordMap[next ?? ''] ?? (next && /^\d$/.test(next) ? next : '');
-      if (digit) out += digit + digit + digit;
-    } else if (wordMap[token]) {
-      out += wordMap[token];
-    } else if (/^\d$/.test(token)) {
-      out += token;
-    }
-  }
-  return out.length === 4 ? out : null;
-}
-
+/**
+ * Route the caller's verbatim utterance into the right verify_read_access slot
+ * based purely on the server-held verification gate:
+ *   - gate not set  -> mobile phase: put the caller utterance into
+ *     mobile_last_4 and clear date_of_birth.
+ *   - gate set      -> DOB phase: hardwire mobile_last_4 to the gate and put
+ *     the caller utterance into date_of_birth.
+ *
+ * The server-side AI matchers decide whether the slot content matches the
+ * record (multilingual, multi-script, "double X", "ek do teen", "ون ون ٹو
+ * تھری", etc.). We deliberately avoid any in-process digit or language
+ * parsing.
+ */
 function normalizeVerifyReadAccessArgs(
   input: BuildOpenAIResponseRequestInput,
   raw: Record<string, unknown>,
 ): Record<string, unknown> {
   const next = { ...raw };
-  const dobArg = typeof next.date_of_birth === 'string' ? next.date_of_birth.trim() : '';
   const transcript = input.transcript.trim();
-  const verifiedMobile = input.toolContext?.verifiedMobileLast4?.trim();
+  const mobileArg = typeof next.mobile_last_4 === 'string' ? next.mobile_last_4.trim() : '';
+  const dobArg = typeof next.date_of_birth === 'string' ? next.date_of_birth.trim() : '';
+  const verifiedMobile = input.toolContext?.verifiedMobileLast4?.trim() ?? '';
+  const dobPhase = verifiedMobile.length === 4;
 
-  const lastModel = lastModelText(input.history);
-  const expectingMobile = /last four|last chaar|chaar digits/i.test(lastModel) && !/date of birth|DOB/i.test(lastModel);
-  const spokenMobile = spokenLastFourToDigits(transcript);
-
-  if (expectingMobile && spokenMobile && dobArg && dobArg === transcript) {
-    next.date_of_birth = '';
-    next.mobile_last_4 = spokenMobile;
-  }
-
-  if (expectingMobile && spokenMobile && !dobArg) {
-    next.mobile_last_4 = spokenMobile;
-    next.date_of_birth = '';
-  }
-
-  if (verifiedMobile && /^\d{4}$/.test(verifiedMobile)) {
-    if (/date of birth|DOB|Apni date|dob/i.test(lastModel) || dobArg) {
-      next.mobile_last_4 = verifiedMobile;
-      if (!dobArg && transcript.length > 0 && !/^\d{4}$/.test(transcript)) {
-        next.date_of_birth = transcript;
-      }
+  if (dobPhase) {
+    next.mobile_last_4 = verifiedMobile;
+    if (!dobArg && transcript && transcript !== verifiedMobile) {
+      next.date_of_birth = transcript;
     }
+    return next;
   }
 
-  if (expectingMobile && dobArg) {
-    next.date_of_birth = '';
-  }
-
-  if (expectingMobile && /^\d{4}$/.test(transcript) && dobArg === transcript) {
-    next.date_of_birth = '';
+  const mobileIsCleanFourDigit = /^\d{4}$/.test(mobileArg);
+  if (!mobileIsCleanFourDigit && transcript) {
     next.mobile_last_4 = transcript;
   }
-
-  const dobStill = typeof next.date_of_birth === 'string' ? next.date_of_birth.trim() : '';
-  if (
-    /date of birth|DOB|Apni date|dob|batayein/i.test(lastModel) &&
-    !dobStill &&
-    transcript.trim() &&
-    !/^\d{4}$/.test(transcript.trim())
-  ) {
-    next.date_of_birth = transcript.trim();
-  }
-
+  next.date_of_birth = '';
   return next;
 }
 
@@ -859,6 +831,8 @@ function buildExecutionContext(
     createSupportTicket: input.toolContext?.createSupportTicket,
     sendSecureLink: input.toolContext?.sendSecureLink,
     skipAiDobVerification: input.skipAiDobVerification === true || process.env.STABLE_DISABLE_AI_DOB === '1',
+    skipAiMobileVerification:
+      input.skipAiMobileVerification === true || process.env.STABLE_DISABLE_AI_MOBILE === '1',
   };
 }
 
@@ -910,14 +884,14 @@ export async function runStableAgent(
       toolsField = undefined;
     }
 
+    const runOnceModel = getAgentModel();
     const request: OpenAIResponseRequest = {
-      model: getAgentModel(),
+      model: runOnceModel,
       instructions: buildStableAgentInstructions(merged, toolNames),
       input: messages,
       tools: toolsField,
       max_output_tokens: maxOut,
-      reasoning: { effort: 'low' },
-      text: { verbosity: 'low' },
+      ...reasoningFieldsForModel(runOnceModel),
     };
 
     const json = await createOpenAIResponse(apiKey, request);
@@ -1090,14 +1064,14 @@ export async function streamStableAgentText(
       history: input.history,
     });
     const toolsPayload = declarationsForToolNames(toolNames);
+    const streamModel = getAgentModel();
     const request: OpenAIResponseRequest = {
-      model: getAgentModel(),
+      model: streamModel,
       instructions: buildStableAgentInstructions(merged, toolNames),
       input: messages,
       tools: toolsPayload.length > 0 ? toolsPayload : undefined,
       max_output_tokens: AGENT_INITIAL_MAX_OUTPUT_TOKENS,
-      reasoning: { effort: 'low' },
-      text: { verbosity: 'low' },
+      ...reasoningFieldsForModel(streamModel),
       stream: true,
     };
 
@@ -1173,15 +1147,15 @@ export async function streamStableAgentText(
       history: input.history,
     });
     const toolsPayload = declarationsForToolNames(toolNames);
+    const recoveryModel = getAgentModel();
     emitTiming('openai_recovery_request_start', { maxOutputTokens });
     const json = await createOpenAIResponse(apiKey, {
-      model: getAgentModel(),
+      model: recoveryModel,
       instructions: buildStableAgentInstructions(merged, toolNames),
       input: messages,
       tools: toolsPayload.length > 0 ? toolsPayload : undefined,
       max_output_tokens: maxOutputTokens,
-      reasoning: { effort: 'low' },
-      text: { verbosity: 'low' },
+      ...reasoningFieldsForModel(recoveryModel),
     });
     emitTiming('openai_recovery_response_ready', {
       maxOutputTokens,
