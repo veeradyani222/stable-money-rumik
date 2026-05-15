@@ -23,10 +23,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ client_secret: clientSecret.value, expires_at: clientSecret.expires_at });
   } catch (error) {
     if (error instanceof OpenAIRealtimeError) {
-      console.error('[openai-realtime-token]', {
-        status: error.status,
-        detailsPreview: error.details.slice(0, 1000),
-      });
       return NextResponse.json(
         { error: error.message, details: error.details },
         { status: error.status },

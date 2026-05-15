@@ -128,7 +128,7 @@ test('createSupportTicketForSession returns before the confirmation email finish
   }
 });
 
-test('createSupportTicketForSession logs background email failures without delaying the ticket', async () => {
+test('createSupportTicketForSession handles background email failures without console logging or delaying the ticket', async () => {
   const pool = {
     query: async <T = Record<string, unknown>>(sql: string) => {
       if (/SELECT email, open_tickets/i.test(sql)) {
@@ -136,12 +136,6 @@ test('createSupportTicketForSession logs background email failures without delay
       }
       return queryResult([] as T[], 0);
     },
-  };
-
-  const errors: unknown[][] = [];
-  const originalConsoleError = console.error;
-  console.error = (...args: unknown[]) => {
-    errors.push(args);
   };
 
   const result = await createSupportTicketForSession(
@@ -159,16 +153,8 @@ test('createSupportTicketForSession logs background email failures without delay
   );
 
   await new Promise((resolve) => setTimeout(resolve, 0));
-  console.error = originalConsoleError;
 
-  try {
-    assert.equal(result.ok, true);
-    assert.equal(result.summary, 'Support ticket create ho gaya hai. Confirmation email thodi der mein aa jayega.');
-    assert.equal(result.data?.email_pending, true);
-    assert.equal(errors.length, 1);
-    assert.equal(errors[0]?.[0], '[support-ticket:email]');
-    assert.equal((errors[0]?.[1] as { event?: string } | undefined)?.event, 'email_send_failed');
-  } finally {
-    console.error = originalConsoleError;
-  }
+  assert.equal(result.ok, true);
+  assert.equal(result.summary, 'Support ticket create ho gaya hai. Confirmation email thodi der mein aa jayega.');
+  assert.equal(result.data?.email_pending, true);
 });

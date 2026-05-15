@@ -8,6 +8,7 @@ import {
 } from '@/lib/agent/openai-agent';
 import { createSupportTicketForSession } from '@/lib/agent/support-tickets';
 import { sendSecureLinkForSession } from '@/lib/agent/secure-links';
+import type { StableIntentRoute } from '@/lib/agent/stable-policy';
 import { getPool } from '@/lib/db';
 import { buildPersonaFromDemoUserRow } from '@/lib/demo-users';
 import {
@@ -18,6 +19,15 @@ import {
   markDemoCallVerifiedMobileLastFour,
 } from '@/lib/session-auth';
 import { createSseWriter } from './sse';
+
+function getTurnPolicyFromRoute(route: StableIntentRoute) {
+  const isTerminalGoodbye = route.intent === 'conversation.goodbye';
+  return {
+    suppressFiller: isTerminalGoodbye,
+    endCallAfterResponse: isTerminalGoodbye,
+  };
+}
+
 function validHistory(value: unknown): AgentHistoryMessage[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -99,8 +109,12 @@ export async function POST(request: Request) {
               writer.send('delta', { delta });
             },
             (debugEvent) => {
-              if (debugEvent.type === 'route') {
+              if (debugEvent.type === 'timing') {
+                writer.send('timing', debugEvent.timing);
+              } else if (debugEvent.type === 'route') {
                 writer.send('route', debugEvent.route);
+                const turnPolicy = { event: 'policy', data: getTurnPolicyFromRoute(debugEvent.route) };
+                writer.send(turnPolicy.event, turnPolicy.data);
               } else if (debugEvent.type === 'stream') {
                 writer.send('stream', debugEvent.event);
               } else {
@@ -111,7 +125,6 @@ export async function POST(request: Request) {
           if (answer.verified) await markDemoCallVerifiedInStore(pool, sessionId, callId);
           writer.send('done', answer);
         } catch (error) {
-          console.error('[agent/respond-stream]', error);
           const message = error instanceof Error ? error.message : 'Could not generate response';
           const status = error instanceof OpenAIRequestError ? error.status : 500;
           writer.send('error', { error: message, status });
@@ -130,7 +143,6 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    console.error('[agent/respond-stream]', error);
     const message = error instanceof Error ? error.message : 'Could not generate response';
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -190,7 +190,7 @@ test('agent call client pipelines streamed text chunks into Rumik playback', () 
 
   assert.match(clientSource, /waitForCompletion\?: boolean/);
   assert.match(clientSource, /playbackQueue = Promise\.resolve\(\)/);
-  assert.match(clientSource, /playRumikText\(chunk,\s*\{\s*resetPlayback: false,\s*waitForCompletion: false\s*\}\)/);
+  assert.match(clientSource, /playRumikText\(chunk,\s*\{\s*resetPlayback: false,\s*waitForCompletion: false,\s*timingLabel: 'answer'\s*\}\)/);
   assert.match(clientSource, /Promise\.all\(\[thinkingFillerPlayback,\s*playbackQueue\]\)/);
   assert.match(clientSource, /await waitForRumikPlaybackTurn\(\)/);
 });

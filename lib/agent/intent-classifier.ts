@@ -48,8 +48,8 @@ export interface IntentClassifierInput {
 }
 
 const CLASSIFIER_CACHE_LIMIT = 250;
-const CLASSIFIER_MAX_OUTPUT_TOKENS = 1024;
-const CLASSIFIER_RETRY_MAX_OUTPUT_TOKENS = 2048;
+const CLASSIFIER_MAX_OUTPUT_TOKENS = 8000;
+const CLASSIFIER_RETRY_MAX_OUTPUT_TOKENS = 8000;
 const MAX_CLASSIFIER_INVALID_OUTPUT_ATTEMPTS = 2;
 const INTENT_IDS: StableIntentId[] = [
   'payment.failed',
@@ -68,6 +68,7 @@ const INTENT_IDS: StableIntentId[] = [
   'account.overview',
   'refund.status',
   'secure.action.help',
+  'conversation.goodbye',
   'unknown',
 ];
 
@@ -91,6 +92,7 @@ const INTENT_CLASSIFICATION_GUIDE: Record<StableIntentId, string> = {
   'account.overview': 'General account status, what the caller has, account snapshot, or verified safe overview.',
   'refund.status': 'Refund timing, when refund will arrive, refund ETA, or refund state.',
   'secure.action.help': 'Mobile number change, bank account change, nominee update, or profile modification.',
+  'conversation.goodbye': 'Caller is ending the conversation, says they are done, or asks to hang up.',
   unknown: 'Unrelated, too unclear, or not enough information to choose a Stable Money support intent.',
 };
 function getIntentClassifierModel(): string {
@@ -193,18 +195,7 @@ function normalizeConfidence(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
 }
 
-function classifierLogDetails(input: IntentClassifierInput, extra: Record<string, unknown>) {
-  return {
-    at: new Date().toISOString(),
-    transcript_chars: input.transcript.length,
-    history_messages: input.history.length,
-    model: getIntentClassifierModel(),
-    ...extra,
-  };
-}
-
-function logClassifierFailure(input: IntentClassifierInput, extra: Record<string, unknown>) {
-  console.error('[stable-agent:intent-classifier]', classifierLogDetails(input, extra));
+function logClassifierFailure(_input: IntentClassifierInput, _extra: Record<string, unknown>) {
 }
 
 function buildClassifierRequestBody(

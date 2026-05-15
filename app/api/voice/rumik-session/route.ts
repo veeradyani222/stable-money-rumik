@@ -5,32 +5,18 @@ import { normalizeRumikText } from '@/lib/voice/rumik-text';
 export async function POST(request: Request) {
   const apiKey = process.env.RUMIK_API_KEY;
   if (!apiKey) {
-    console.error('[rumik-session]', {
-      at: new Date().toISOString(),
-      event: 'config:missing-api-key',
-    });
     return NextResponse.json({ error: 'Missing required environment variable: RUMIK_API_KEY' }, { status: 500 });
   }
 
   let body: unknown;
   try {
     body = await request.json();
-  } catch (error) {
-    console.error('[rumik-session]', {
-      at: new Date().toISOString(),
-      event: 'request:invalid-json',
-      error: error instanceof Error ? error.message : String(error),
-    });
+  } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
   const text = body && typeof body === 'object' ? (body as { text?: unknown }).text : null;
   if (typeof text !== 'string' || text.trim().length < 1) {
-    console.error('[rumik-session]', {
-      at: new Date().toISOString(),
-      event: 'request:missing-text',
-      body_type: typeof body,
-    });
     return NextResponse.json({ error: 'Missing text' }, { status: 400 });
   }
 
@@ -50,25 +36,12 @@ export async function POST(request: Request) {
         model,
       }),
     });
-  } catch (error) {
-    console.error('[rumik-session]', {
-      at: new Date().toISOString(),
-      event: 'fetch:error',
-      base_url: baseUrl,
-      model,
-      error: error instanceof Error ? error.message : String(error),
-    });
+  } catch {
     return NextResponse.json({ error: 'Could not reach Rumik TTS session API' }, { status: 502 });
   }
 
   const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
-    console.error('[rumik-session]', {
-      at: new Date().toISOString(),
-      event: 'response:error',
-      status: response.status,
-      details: data,
-    });
     return NextResponse.json({ error: 'Could not create Rumik TTS session', details: data }, { status: response.status });
   }
 

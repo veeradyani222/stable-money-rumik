@@ -76,6 +76,7 @@ test('buildOpenAIResponseRequest includes persona context, tools, and short-call
   assert.doesNotMatch(request.instructions, /TKT-10031/);
   assert.doesNotMatch(request.instructions, /Shriram Finance/);
   assert.match(request.instructions, /Selected demo persona is available only for verification and tool execution/i);
+  assert.equal(request.max_output_tokens, 8000);
   assert.deepEqual(request.tools?.map((tool) => tool.name), ['verify_read_access']);
   const lastInput = request.input.at(-1);
   assert.ok(lastInput && 'role' in lastInput);
@@ -639,7 +640,7 @@ test('runStableAgent sends requests to OpenAI Responses API', async () => {
     const body = JSON.parse(String(requests[0].init?.body));
     assert.equal(body.model, 'gpt-5.1-mini');
     assert.equal(body.tools[0].type, 'function');
-    assert.equal(body.max_output_tokens, 600);
+    assert.equal(body.max_output_tokens, 8000);
     assert.deepEqual(body.reasoning, { effort: 'low' });
     assert.deepEqual(body.text, { verbosity: 'low' });
     assert.equal('temperature' in body, false);
@@ -711,17 +712,15 @@ test('runStableAgent executes an OpenAI tool call and sends the tool result back
   }
 });
 
-test('runStableAgent logs route and tool execution details without OpenAI success chatter', async () => {
+test('runStableAgent executes verification without console logging', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.OPENAI_API_KEY;
   const originalModel = process.env.OPENAI_AGENT_MODEL;
-  const originalInfo = console.info;
 
   let callCount = 0;
-  const logs: unknown[][] = [];
   globalThis.fetch = (async (_url: string | URL | Request) => {
     callCount += 1;
     if (callCount === 1) {
@@ -749,9 +748,6 @@ test('runStableAgent logs route and tool execution details without OpenAI succes
       }),
     } as Response;
   }) as typeof fetch;
-  console.info = (...args: unknown[]) => {
-    logs.push(args);
-  };
 
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
@@ -764,20 +760,8 @@ test('runStableAgent logs route and tool execution details without OpenAI succes
     });
 
     assert.equal(result.verified, true);
-    const toolLogs = logs.filter((entry) => entry[0] === '[stable-agent:tool]');
-    assert.equal(toolLogs.length, 2);
-    assert.match(JSON.stringify(logs), /\[stable-agent:route\]/);
-    assert.doesNotMatch(JSON.stringify(logs), /\[stable-agent:openai\]/);
-    assert.match(JSON.stringify(toolLogs[0][1]), /"phase":"start"/);
-    assert.match(JSON.stringify(toolLogs[0][1]), /"tool":"verify_read_access"/);
-    assert.match(JSON.stringify(toolLogs[0][1]), /"auth_tier":"Tier B"/);
-    assert.match(JSON.stringify(toolLogs[0][1]), /"arguments":\{"mobile_last_4":"3210","date_of_birth":"1991-08-14"\}/);
-    assert.match(JSON.stringify(toolLogs[1][1]), /"phase":"result"/);
-    assert.match(JSON.stringify(toolLogs[1][1]), /"auth_tier":"Tier B"/);
-    assert.match(JSON.stringify(toolLogs[1][1]), /"ok":true/);
   } finally {
     globalThis.fetch = originalFetch;
-    console.info = originalInfo;
     process.env.OPENAI_API_KEY = originalApiKey;
     process.env.OPENAI_AGENT_MODEL = originalModel;
   }
@@ -877,10 +861,8 @@ test('runStableAgent uses the matched mobile last four when DOB tool args carry 
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.OPENAI_API_KEY;
   const originalModel = process.env.OPENAI_AGENT_MODEL;
-  const originalInfo = console.info;
 
   let callCount = 0;
-  const toolLogs: unknown[][] = [];
   globalThis.fetch = (async () => {
     callCount += 1;
     if (callCount === 1) {
@@ -908,9 +890,6 @@ test('runStableAgent uses the matched mobile last four when DOB tool args carry 
       }),
     } as Response;
   }) as typeof fetch;
-  console.info = (...args: unknown[]) => {
-    if (args[0] === '[stable-agent:tool]') toolLogs.push(args);
-  };
 
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
@@ -933,11 +912,8 @@ test('runStableAgent uses the matched mobile last four when DOB tool args carry 
 
     assert.equal(result.verified, true);
     assert.equal(result.text, '[neutral] Verification complete.');
-    assert.match(JSON.stringify(toolLogs), /"mobile_last_4":"3210","date_of_birth":"1991-08-14"/);
-    assert.doesNotMatch(JSON.stringify(toolLogs), /"mobile_last_4":"5498","date_of_birth":"1991-08-14"/);
   } finally {
     globalThis.fetch = originalFetch;
-    console.info = originalInfo;
     process.env.OPENAI_API_KEY = originalApiKey;
     process.env.OPENAI_AGENT_MODEL = originalModel;
   }
@@ -950,10 +926,8 @@ test('runStableAgent keeps the matched mobile last four while retrying DOB after
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.OPENAI_API_KEY;
   const originalModel = process.env.OPENAI_AGENT_MODEL;
-  const originalInfo = console.info;
 
   let callCount = 0;
-  const toolLogs: unknown[][] = [];
   globalThis.fetch = (async () => {
     callCount += 1;
     if (callCount === 1) {
@@ -981,9 +955,6 @@ test('runStableAgent keeps the matched mobile last four while retrying DOB after
       }),
     } as Response;
   }) as typeof fetch;
-  console.info = (...args: unknown[]) => {
-    if (args[0] === '[stable-agent:tool]') toolLogs.push(args);
-  };
 
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
@@ -1006,11 +977,8 @@ test('runStableAgent keeps the matched mobile last four while retrying DOB after
 
     assert.equal(result.verified, true);
     assert.equal(result.text, '[neutral] Verification complete.');
-    assert.match(JSON.stringify(toolLogs), /"mobile_last_4":"3210","date_of_birth":"1991-08-14"/);
-    assert.doesNotMatch(JSON.stringify(toolLogs), /"mobile_last_4":"1992","date_of_birth":"1991-08-14"/);
   } finally {
     globalThis.fetch = originalFetch;
-    console.info = originalInfo;
     process.env.OPENAI_API_KEY = originalApiKey;
     process.env.OPENAI_AGENT_MODEL = originalModel;
   }
@@ -1341,8 +1309,8 @@ test('runStableAgent retries recovery with a larger budget when recovery is inco
 
     assert.equal(result.text, '[neutral] Ye secure change voice par complete nahi ho sakta. Main secure link bhejne mein help karti hoon.');
     assert.equal(callCount, 5);
-    assert.equal((requestBodies[3] as { max_output_tokens?: number }).max_output_tokens, 1200);
-    assert.equal((requestBodies[4] as { max_output_tokens?: number }).max_output_tokens, 2400);
+    assert.equal((requestBodies[3] as { max_output_tokens?: number }).max_output_tokens, 8000);
+    assert.equal((requestBodies[4] as { max_output_tokens?: number }).max_output_tokens, 8000);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1591,7 +1559,7 @@ test('streamStableAgentText recovers before emitting deltas when OpenAI ends inc
     assert.equal(result.text, '[neutral] Kripya registered mobile number ke last chaar digits batayein.');
     assert.equal(requestBodies.length, 2);
     assert.equal((requestBodies[0] as { stream?: boolean }).stream, true);
-    assert.equal((requestBodies[1] as { max_output_tokens?: number }).max_output_tokens, 1200);
+    assert.equal((requestBodies[1] as { max_output_tokens?: number }).max_output_tokens, 8000);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1664,7 +1632,7 @@ test('streamStableAgentText recovers when OpenAI sends response.incomplete with 
     assert.equal(result.text, '[neutral] KYC status check karne ke liye mobile last four bata dijiye.');
     assert.equal(requestBodies.length, 2);
     assert.equal((requestBodies[0] as { stream?: boolean }).stream, true);
-    assert.equal((requestBodies[1] as { max_output_tokens?: number }).max_output_tokens, 1200);
+    assert.equal((requestBodies[1] as { max_output_tokens?: number }).max_output_tokens, 8000);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;

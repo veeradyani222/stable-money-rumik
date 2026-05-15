@@ -6,7 +6,6 @@ import { useSearchParams } from 'next/navigation';
 import type { PersonaSuggestion, PersonaBrief } from '@/lib/agent/persona-suggestions';
 import { buildPersonaDetailSections } from '@/lib/agent/persona-panel';
 import { STABLE_DEFAULT_OPENING } from '@/lib/agent/stable-call-copy';
-import { shouldLogDiagnosticEvent } from '@/lib/diagnostics/log-filter';
 import type { PersonaSeed } from '@/lib/personas';
 import { AgentAudioVisualizerBar, type AgentVisualizerSpeaker } from '@/components/agents-ui/agent-audio-visualizer-bar';
 import {
@@ -52,11 +51,28 @@ interface AgentStreamResult {
   text: string;
   toolCalls: string[];
   verified?: boolean;
+  suppressFiller?: boolean;
+  endCallAfterResponse?: boolean;
 }
 
 interface AgentStreamMessage {
   event: string;
   data: Record<string, unknown>;
+}
+
+interface VoiceTimingTurn {
+  id: string;
+  startedAt: number;
+  firstDeltaLogged: boolean;
+  firstSpeakableLogged: boolean;
+  firstAnswerTextSentLogged: boolean;
+  firstAnswerAudioLogged: boolean;
+  firstAnswerAudioScheduledLogged: boolean;
+}
+
+interface AgentTurnPolicy {
+  suppressFiller?: boolean;
+  endCallAfterResponse?: boolean;
 }
 
 type OpeningAudioCacheStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -74,9 +90,8 @@ const RUMIK_MAX_LEADING_SILENCE_DROPS = 20;
 const OPENING_AUDIO_CACHE_TIMEOUT_MS = 12000;
 const USE_OPENAI_REALTIME_TRANSCRIPTION = true;
 const STABLE_THINKING_FILLERS = [
-  '[neutral] Ji, main check kar rahi hoon. Mujhe ek minute dijiye, mai abhi batati hoon.',
-  '[neutral] Ek minute dijiye, main details nikalti hoon aur aapko batati hoon.',
-  '[neutral] Thank you, main isko abhi check kar leti hoon aur aapko batati hoon.',
+  '[neutral] Ek minute dijiye, main system mein iski details nikalti hoon aur aapko batati hoon. Wait karne ke liye thank you',
+  '[neutral] Okay, main abhi check kar leti hoon aur aapko batati hoon. Thank you for your understanding.',
 ] as const;
 const AGENT_CLIENT_HISTORY_LIMIT = 16;
 /** Ringtones: MP3 only, from `public/assets/` → `/assets/…` */
@@ -202,12 +217,38 @@ function getPcm16Rms(chunk: ArrayBuffer): number {
 }
 
 function logVoiceDebug(event: string, details?: Record<string, unknown>) {
-  if (!shouldLogDiagnosticEvent({ event })) return;
+  void event;
+  void details;
+}
 
-  console.info('[voice-debug]', event, {
-    at: new Date().toISOString(),
-    ...(details ?? {}),
-  });
+function postVoiceTiming(input: {
+  callId: string;
+  turn: VoiceTimingTurn;
+  event: string;
+  details?: Record<string, unknown>;
+}) {
+  if (typeof window === 'undefined') return;
+
+  const payload = {
+    event: input.event,
+    call_id: input.callId,
+    turn_id: input.turn.id,
+    elapsedMs: performance.now() - input.turn.startedAt,
+    details: input.details ?? {},
+  };
+
+  const body = JSON.stringify(payload);
+  if (navigator.sendBeacon) {
+    const sent = navigator.sendBeacon('/api/voice/timing-log', new Blob([body], { type: 'application/json' }));
+    if (sent) return;
+  }
+
+  void fetch('/api/voice/timing-log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function getRealtimeTranscript(event: OpenAIRealtimeTranscriptEvent): string {
@@ -244,6 +285,7 @@ function parseAgentStreamBlock(block: string): AgentStreamMessage | null {
 async function readAgentResponseStream(
   response: Response,
   onDelta: (delta: string) => void,
+  onPolicy?: (policy: AgentTurnPolicy) => void,
 ): Promise<AgentStreamResult> {
   if (!response.body) throw new Error('Agent stream did not include a response body');
 
@@ -266,20 +308,22 @@ async function readAgentResponseStream(
         const delta = typeof message.data.delta === 'string' ? message.data.delta : '';
         if (delta) onDelta(delta);
       }
-      if (message.event === 'route') {
-        console.info('[stable-agent:route]', message.data);
-      }
-      if (message.event === 'stream') {
-        console.info('[stable-agent:stream]', message.data);
-      }
-      if (message.event === 'tool') {
-        console.info('[stable-agent:tool]', message.data);
+      if (message.event === 'policy') {
+        const policy = {
+          suppressFiller: typeof message.data.suppressFiller === 'boolean' ? message.data.suppressFiller : undefined,
+          endCallAfterResponse:
+            typeof message.data.endCallAfterResponse === 'boolean' ? message.data.endCallAfterResponse : undefined,
+        };
+        result = { ...result, ...policy };
+        onPolicy?.(policy);
       }
       if (message.event === 'done') {
         result = {
           text: typeof message.data.text === 'string' ? message.data.text : result.text,
           toolCalls: Array.isArray(message.data.toolCalls) ? message.data.toolCalls.map(String) : [],
           verified: typeof message.data.verified === 'boolean' ? message.data.verified : result.verified,
+          suppressFiller: result.suppressFiller,
+          endCallAfterResponse: result.endCallAfterResponse,
         };
       }
       if (message.event === 'error') {
@@ -657,8 +701,7 @@ export function AgentCallClient() {
   const transcriptionAttemptRef = useRef(0);
   const rumikLeadingSilenceRef = useRef({ trimming: true, dropped: 0 });
   const latestMicRmsRef = useRef(0);
-  /** True while the current turn's thinking filler is using live Rumik (not cached PCM). */
-  const thinkingFillerPlaybackUsedRumikRef = useRef(false);
+  const activeVoiceTimingTurnRef = useRef<VoiceTimingTurn | null>(null);
   const callAbortRef = useRef<AbortController | null>(null);
 
   const syncMicrophoneRecorder = useCallback((nextMuted: boolean, nextCallState: CallState) => {
@@ -1021,6 +1064,16 @@ export function AgentCallClient() {
               const chunk = event.data as ArrayBuffer;
               rumikBinaryPacketCountRef.current += 1;
               const rms = getPcm16Rms(chunk);
+              const activeTimingTurn = activeVoiceTimingTurnRef.current;
+              if (activeTimingTurn?.firstAnswerTextSentLogged && !activeTimingTurn.firstAnswerAudioLogged) {
+                activeTimingTurn.firstAnswerAudioLogged = true;
+                postVoiceTiming({
+                  callId: callIdRef.current,
+                  turn: activeTimingTurn,
+                  event: 'rumik_answer_first_audio_packet',
+                  details: { bytes: chunk.byteLength },
+                });
+              }
               logVoiceDebug('rumik:message:binary', {
                 packet: rumikBinaryPacketCountRef.current,
                 bytes: chunk.byteLength,
@@ -1053,14 +1106,25 @@ export function AgentCallClient() {
               source.buffer = buffer;
               source.connect(context.destination);
               const startAt = Math.max(scheduledAtRef.current, context.currentTime + 0.02);
+              const delayMs = Math.round((startAt - context.currentTime) * 1000);
+              const queueMs = Math.round(Math.max(0, scheduledAtRef.current - context.currentTime) * 1000);
+              if (activeTimingTurn?.firstAnswerTextSentLogged && !activeTimingTurn.firstAnswerAudioScheduledLogged) {
+                activeTimingTurn.firstAnswerAudioScheduledLogged = true;
+                postVoiceTiming({
+                  callId: callIdRef.current,
+                  turn: activeTimingTurn,
+                  event: 'rumik_answer_first_audio_scheduled',
+                  details: { delayMs, queueMs, bytes: chunk.byteLength },
+                });
+              }
               source.start(startAt);
               pendingRumikSourcesRef.current += 1;
               logVoiceDebug('rumik:message:binary:scheduled', {
                 packet: rumikBinaryPacketCountRef.current,
                 currentTime: Number(context.currentTime.toFixed(3)),
                 startAt: Number(startAt.toFixed(3)),
-                delayMs: Math.round((startAt - context.currentTime) * 1000),
-                queueMs: Math.round(Math.max(0, scheduledAtRef.current - context.currentTime) * 1000),
+                delayMs,
+                queueMs,
                 pendingSources: pendingRumikSourcesRef.current,
               });
               scheduledAtRef.current = startAt + buffer.duration;
@@ -1334,7 +1398,12 @@ export function AgentCallClient() {
   const playRumikText = useCallback(
     async (
       text: string,
-      options: { resetPlayback?: boolean; waitForCompletion?: boolean; trimLeadingSilence?: boolean } = {},
+      options: {
+        resetPlayback?: boolean;
+        waitForCompletion?: boolean;
+        trimLeadingSilence?: boolean;
+        timingLabel?: 'answer';
+      } = {},
     ) => {
       const resetPlayback = options.resetPlayback ?? true;
       const waitForCompletion = options.waitForCompletion ?? true;
@@ -1359,6 +1428,18 @@ export function AgentCallClient() {
       const packet = { text: normalizeRumikText(text).slice(0, 2000), speaker_id: 0 };
       pendingRumikRequestsRef.current += 1;
       rumikStreamDoneRef.current = false;
+      if (options.timingLabel === 'answer') {
+        const activeTimingTurn = activeVoiceTimingTurnRef.current;
+        if (activeTimingTurn && !activeTimingTurn.firstAnswerTextSentLogged) {
+          activeTimingTurn.firstAnswerTextSentLogged = true;
+          postVoiceTiming({
+            callId: callIdRef.current,
+            turn: activeTimingTurn,
+            event: 'rumik_answer_text_sent',
+            details: { textChars: packet.text.length },
+          });
+        }
+      }
       logVoiceDebug('rumik:send:text', {
         textChars: packet.text.length,
         speaker_id: packet.speaker_id,
@@ -1384,7 +1465,14 @@ export function AgentCallClient() {
   );
 
   const playThinkingFillerAudio = useCallback(async () => {
-    thinkingFillerPlaybackUsedRumikRef.current = false;
+    const timingTurn = activeVoiceTimingTurnRef.current;
+    if (timingTurn) {
+      postVoiceTiming({
+        callId: callIdRef.current,
+        turn: timingTurn,
+        event: 'filler_playback_start',
+      });
+    }
     const readyIndexes = thinkingFillerAudioCaches
       .map((cache, index) => ({ cache, index }))
       .filter(({ cache }) => cache.chunks.length > 0);
@@ -1402,9 +1490,18 @@ export function AgentCallClient() {
       void prefetchAudioCache({ cache, text, label: 'thinking-filler' });
     }
 
-    if (await playCachedAudioChunks(cache, 'thinking-filler')) return;
-    thinkingFillerPlaybackUsedRumikRef.current = true;
-    await playRumikText(text, { trimLeadingSilence: false });
+    try {
+      if (await playCachedAudioChunks(cache, 'thinking-filler')) return;
+      await playRumikText(text, { trimLeadingSilence: false });
+    } finally {
+      if (timingTurn) {
+        postVoiceTiming({
+          callId: callIdRef.current,
+          turn: timingTurn,
+          event: 'filler_playback_end',
+        });
+      }
+    }
   }, [appendTranscript, playCachedAudioChunks, playRumikText]);
 
   const playOpeningAudio = useCallback(async () => {
@@ -1416,176 +1513,6 @@ export function AgentCallClient() {
     }
     await playRumikText(STABLE_DEFAULT_OPENING, { trimLeadingSilence: false });
   }, [playCachedOpeningAudio, playRumikText]);
-
-  const askAgent = useCallback(
-    async (text: string) => {
-      if (!session) return;
-      if (respondingRef.current) {
-        pendingInterruptRef.current = text;
-        stopRumikAudio();
-        logVoiceDebug('agent:interrupt:queued', { textChars: text.length });
-        return;
-      }
-      respondingRef.current = true;
-      setCallState('thinking');
-      setInterimText('');
-      appendTranscript('user', text);
-      logVoiceDebug('agent:request', { text });
-      warmRumikSocket();
-      const thinkingFillerPlayback = playThinkingFillerAudio().catch((fillerError) => {
-        logVoiceDebug('agent:thinking-filler:error', {
-          message: fillerError instanceof Error ? fillerError.message : 'Thinking filler playback failed',
-        });
-      });
-      let hasQueuedStreamAudio = false;
-
-      try {
-        const controller = new AbortController();
-        agentAbortControllerRef.current = controller;
-        const streamResponse = await fetch('/api/agent/respond-stream', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            session_id: session.session_id,
-            call_id: callIdRef.current,
-            transcript: text,
-            history: historyRef.current,
-          }),
-        });
-        if (!streamResponse.ok || !streamResponse.body) {
-          const data = await streamResponse.json().catch(() => ({}));
-          throw new Error(data?.error || 'Could not get streamed agent response');
-        }
-
-        const chunkBuffer = createRumikChunkBuffer();
-        let playbackQueue = Promise.resolve();
-        let queuedChunks = 0;
-        let streamedText = '';
-
-        const queueRumikChunk = (chunk: string) => {
-          const isFirstStreamChunk = queuedChunks === 0;
-          queuedChunks += 1;
-          hasQueuedStreamAudio = true;
-          logVoiceDebug(isFirstStreamChunk ? 'agent:stream:first-speakable-chunk' : 'agent:stream:speakable-chunk', {
-            chunkChars: chunk.length,
-            queuedChunks,
-          });
-          playbackQueue = playbackQueue.then(async () => {
-            if (!isFirstStreamChunk) {
-              await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false });
-              return;
-            }
-            if (thinkingFillerPlaybackUsedRumikRef.current) {
-              logVoiceDebug('agent:stream:first-chunk:cut-rumik-filler', {});
-              closeRumikSocket();
-              thinkingFillerPlaybackUsedRumikRef.current = false;
-              await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false });
-              return;
-            }
-            await playRumikText(chunk, { resetPlayback: true, waitForCompletion: false });
-          });
-        };
-
-        const data = await readAgentResponseStream(streamResponse, (delta) => {
-          streamedText += delta;
-          logVoiceDebug('agent:stream:delta', { deltaChars: delta.length, totalChars: streamedText.length });
-          pushRumikTextDelta(chunkBuffer, delta).forEach(queueRumikChunk);
-        });
-
-        const tail = flushRumikChunkBuffer(chunkBuffer);
-        if (tail) queueRumikChunk(tail);
-
-        const answer = String(data.text || streamedText).trim();
-        if (data.verified) callVerifiedRef.current = true;
-        if (!hasQueuedStreamAudio && answer) {
-          logVoiceDebug('agent:stream:done-answer-speakable', {
-            answerChars: answer.length,
-            toolCalls: data.toolCalls ?? [],
-          });
-          queueRumikChunk(answer);
-        }
-        logVoiceDebug('agent:response', {
-          status: streamResponse.status,
-          text: answer,
-          toolCalls: data.toolCalls ?? [],
-          streamed: true,
-        });
-        const nextHistory: HistoryMessage[] = [
-          ...historyRef.current,
-          { role: 'user', text },
-          { role: 'model', text: answer },
-        ];
-        historyRef.current = nextHistory.slice(-AGENT_CLIENT_HISTORY_LIMIT);
-        appendTranscript('agent', answer);
-        await Promise.all([thinkingFillerPlayback, playbackQueue]);
-        await waitForRumikPlaybackTurn();
-        agentAbortControllerRef.current = null;
-      } catch (agentError) {
-        if (agentError instanceof Error && agentError.name === 'AbortError') {
-          logVoiceDebug('agent:request:aborted', { message: agentError.message });
-          agentAbortControllerRef.current = null;
-          return;
-        }
-        const message = agentError instanceof Error ? agentError.message : 'Agent response failed';
-        logVoiceDebug('agent:error', { message });
-        if (!hasQueuedStreamAudio) {
-          try {
-            logVoiceDebug('agent:fallback:request');
-            const response = await fetch('/api/agent/respond', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                session_id: session.session_id,
-                call_id: callIdRef.current,
-                transcript: text,
-                history: historyRef.current,
-              }),
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data?.error || 'Could not get agent response');
-            const answer = String(data.text || '').trim();
-            if (data.verified) callVerifiedRef.current = true;
-            logVoiceDebug('agent:fallback:response', { status: response.status, text: answer, toolCalls: data.toolCalls ?? [] });
-            const fallbackHistory: HistoryMessage[] = [
-              ...historyRef.current,
-              { role: 'user', text },
-              { role: 'model', text: answer },
-            ];
-            historyRef.current = fallbackHistory.slice(-AGENT_CLIENT_HISTORY_LIMIT);
-            appendTranscript('agent', answer);
-            await thinkingFillerPlayback;
-            await playRumikText(answer, { resetPlayback: false });
-            return;
-          } catch (fallbackError) {
-            logVoiceDebug('agent:fallback:error', {
-              message: fallbackError instanceof Error ? fallbackError.message : 'Fallback agent response failed',
-            });
-          }
-        }
-        setError(message);
-        setCallState('error');
-        appendTranscript('system', message);
-      } finally {
-        respondingRef.current = false;
-        const pendingInterrupt = pendingInterruptRef.current;
-        pendingInterruptRef.current = '';
-        if (pendingInterrupt && !isInactiveCallState(callStateRef.current)) {
-          void askAgent(pendingInterrupt);
-        }
-      }
-    },
-    [
-      appendTranscript,
-      closeRumikSocket,
-      playRumikText,
-      playThinkingFillerAudio,
-      session,
-      stopRumikAudio,
-      waitForRumikPlaybackTurn,
-      warmRumikSocket,
-    ],
-  );
 
   const endCall = useCallback(() => {
     logVoiceDebug('call:end');
@@ -1622,6 +1549,213 @@ export function AgentCallClient() {
     setDuration(0);
     setInterimText('');
   }, [closeRumikSocket]);
+
+  const askAgent = useCallback(
+    async (text: string) => {
+      if (!session) return;
+      if (respondingRef.current) {
+        pendingInterruptRef.current = text;
+        stopRumikAudio();
+        logVoiceDebug('agent:interrupt:queued', { textChars: text.length });
+        return;
+      }
+      respondingRef.current = true;
+      setCallState('thinking');
+      setInterimText('');
+      appendTranscript('user', text);
+      logVoiceDebug('agent:request', { text });
+      const timingTurn: VoiceTimingTurn = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        startedAt: performance.now(),
+        firstDeltaLogged: false,
+        firstSpeakableLogged: false,
+        firstAnswerTextSentLogged: false,
+        firstAnswerAudioLogged: false,
+        firstAnswerAudioScheduledLogged: false,
+      };
+      activeVoiceTimingTurnRef.current = timingTurn;
+      postVoiceTiming({
+        callId: callIdRef.current,
+        turn: timingTurn,
+        event: 'transcript_ready',
+        details: { transcriptChars: text.length },
+      });
+      const controller = new AbortController();
+      agentAbortControllerRef.current = controller;
+      postVoiceTiming({
+        callId: callIdRef.current,
+        turn: timingTurn,
+        event: 'agent_fetch_start',
+      });
+      const streamResponsePromise = fetch('/api/agent/respond-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          session_id: session.session_id,
+          call_id: callIdRef.current,
+          transcript: text,
+          history: historyRef.current,
+        }),
+      });
+      const thinkingFillerPlayback = playThinkingFillerAudio().catch((fillerError) => {
+        logVoiceDebug('agent:thinking-filler:error', {
+          message: fillerError instanceof Error ? fillerError.message : 'Thinking filler playback failed',
+        });
+      });
+      warmRumikSocket();
+      let hasQueuedStreamAudio = false;
+
+      try {
+        const streamResponse = await streamResponsePromise;
+        if (!streamResponse.ok || !streamResponse.body) {
+          const data = await streamResponse.json().catch(() => ({}));
+          throw new Error(data?.error || 'Could not get streamed agent response');
+        }
+
+        const chunkBuffer = createRumikChunkBuffer();
+        let playbackQueue = Promise.resolve();
+        let queuedChunks = 0;
+        let streamedText = '';
+
+        const queueRumikChunk = (chunk: string) => {
+          const isFirstStreamChunk = queuedChunks === 0;
+          queuedChunks += 1;
+          hasQueuedStreamAudio = true;
+          logVoiceDebug(isFirstStreamChunk ? 'agent:stream:first-speakable-chunk' : 'agent:stream:speakable-chunk', {
+            chunkChars: chunk.length,
+            queuedChunks,
+          });
+          if (isFirstStreamChunk && !timingTurn.firstSpeakableLogged) {
+            timingTurn.firstSpeakableLogged = true;
+            postVoiceTiming({
+              callId: callIdRef.current,
+              turn: timingTurn,
+              event: 'agent_first_speakable_chunk',
+              details: { chunkChars: chunk.length },
+            });
+          }
+          playbackQueue = playbackQueue.then(async () => {
+            if (!isFirstStreamChunk) {
+              await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
+              return;
+            }
+            await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
+          });
+        };
+
+        const data = await readAgentResponseStream(streamResponse, (delta) => {
+          streamedText += delta;
+          logVoiceDebug('agent:stream:delta', { deltaChars: delta.length, totalChars: streamedText.length });
+          if (!timingTurn.firstDeltaLogged) {
+            timingTurn.firstDeltaLogged = true;
+            postVoiceTiming({
+              callId: callIdRef.current,
+              turn: timingTurn,
+              event: 'agent_first_delta',
+              details: { deltaChars: delta.length },
+            });
+          }
+          pushRumikTextDelta(chunkBuffer, delta).forEach(queueRumikChunk);
+        });
+
+        const tail = flushRumikChunkBuffer(chunkBuffer);
+        if (tail) queueRumikChunk(tail);
+
+        const answer = String(data.text || streamedText).trim();
+        if (data.verified) callVerifiedRef.current = true;
+        if (!hasQueuedStreamAudio && answer) {
+          logVoiceDebug('agent:stream:done-answer-speakable', {
+            answerChars: answer.length,
+            toolCalls: data.toolCalls ?? [],
+          });
+          queueRumikChunk(answer);
+        }
+        logVoiceDebug('agent:response', {
+          status: streamResponse.status,
+          text: answer,
+          toolCalls: data.toolCalls ?? [],
+          streamed: true,
+        });
+        const nextHistory: HistoryMessage[] = [
+          ...historyRef.current,
+          { role: 'user', text },
+          { role: 'model', text: answer },
+        ];
+        historyRef.current = nextHistory.slice(-AGENT_CLIENT_HISTORY_LIMIT);
+        appendTranscript('agent', answer);
+        await Promise.all([thinkingFillerPlayback, playbackQueue]);
+        await waitForRumikPlaybackTurn();
+        if (data.endCallAfterResponse && !isInactiveCallState(callStateRef.current)) {
+          endCall();
+        }
+        agentAbortControllerRef.current = null;
+      } catch (agentError) {
+        if (agentError instanceof Error && agentError.name === 'AbortError') {
+          logVoiceDebug('agent:request:aborted', { message: agentError.message });
+          agentAbortControllerRef.current = null;
+          return;
+        }
+        const message = agentError instanceof Error ? agentError.message : 'Agent response failed';
+        logVoiceDebug('agent:error', { message });
+        if (!hasQueuedStreamAudio) {
+          try {
+            logVoiceDebug('agent:fallback:request');
+            const response = await fetch('/api/agent/respond', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                session_id: session.session_id,
+                call_id: callIdRef.current,
+                transcript: text,
+                history: historyRef.current,
+              }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data?.error || 'Could not get agent response');
+            const answer = String(data.text || '').trim();
+            if (data.verified) callVerifiedRef.current = true;
+            logVoiceDebug('agent:fallback:response', { status: response.status, text: answer, toolCalls: data.toolCalls ?? [] });
+            const fallbackHistory: HistoryMessage[] = [
+              ...historyRef.current,
+              { role: 'user', text },
+              { role: 'model', text: answer },
+            ];
+            historyRef.current = fallbackHistory.slice(-AGENT_CLIENT_HISTORY_LIMIT);
+            appendTranscript('agent', answer);
+            const answerPlayback = playRumikText(answer, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
+            await Promise.all([thinkingFillerPlayback, answerPlayback]);
+            await waitForRumikPlaybackTurn();
+            return;
+          } catch (fallbackError) {
+            logVoiceDebug('agent:fallback:error', {
+              message: fallbackError instanceof Error ? fallbackError.message : 'Fallback agent response failed',
+            });
+          }
+        }
+        setError(message);
+        setCallState('error');
+        appendTranscript('system', message);
+      } finally {
+        respondingRef.current = false;
+        const pendingInterrupt = pendingInterruptRef.current;
+        pendingInterruptRef.current = '';
+        if (pendingInterrupt && !isInactiveCallState(callStateRef.current)) {
+          void askAgent(pendingInterrupt);
+        }
+      }
+    },
+    [
+      appendTranscript,
+      endCall,
+      playRumikText,
+      playThinkingFillerAudio,
+      session,
+      stopRumikAudio,
+      waitForRumikPlaybackTurn,
+      warmRumikSocket,
+    ],
+  );
 
   useEffect(() => () => endCall(), [endCall]);
 

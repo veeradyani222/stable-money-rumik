@@ -117,7 +117,7 @@ export async function matchCallerDobWithPersonaAi(input: DobAiMatchInput): Promi
       'Do not match based on age alone, zodiac alone, or partial guesses (e.g. only a year).',
       'Ignore politeness fillers; focus on the date content.',
     ].join('\n'),
-    max_output_tokens: 512,
+    max_output_tokens: 8000,
     stream: false,
     reasoning: { effort: 'low' },
     prompt_cache_key: 'stable-dob-verification-v1',

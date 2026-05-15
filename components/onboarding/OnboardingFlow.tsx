@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { PersonaCard } from '@/components/onboarding/PersonaCard';
 import { PersonaDetailModal } from '@/components/onboarding/PersonaDetailModal';
@@ -11,9 +11,21 @@ import { PERSONAS } from '@/lib/personas';
 
 type Step = 1 | 2;
 
+function isIOSDevice() {
+  if (typeof navigator === 'undefined') return false;
+
+  const userAgent = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  const isTouchMac = platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+
+  return /iPad|iPhone|iPod/.test(userAgent) || isTouchMac;
+}
+
 export function OnboardingFlow() {
   const router = useRouter();
   const [step, setStep] = useState<Step>(1);
+  const [microphoneGateRequired, setMicrophoneGateRequired] = useState(false);
+  const [microphoneSubmitting, setMicrophoneSubmitting] = useState(false);
   const [bodyKey, setBodyKey] = useState(0);
   const [email, setEmail] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -23,7 +35,8 @@ export function OnboardingFlow() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const progress = step === 1 ? 50 : 100;
+  const activeStep = microphoneGateRequired ? 0 : step;
+  const progress = activeStep === 0 ? 12 : activeStep === 1 ? 50 : 100;
   const selectedPersona = useMemo(
     () => PERSONAS.find((p) => p.persona_id === selectedPersonaId) ?? null,
     [selectedPersonaId],
@@ -33,12 +46,38 @@ export function OnboardingFlow() {
     setBodyKey((k) => k + 1);
   }, []);
 
+  useEffect(() => {
+    setMicrophoneGateRequired(isIOSDevice());
+  }, []);
+
   const goBack = useCallback(() => {
+    if (microphoneGateRequired) return;
     if (step !== 2) return;
     setError('');
     setStep(1);
     bumpBody();
-  }, [bumpBody, step]);
+  }, [bumpBody, microphoneGateRequired, step]);
+
+  const handleMicrophonePermission = useCallback(async () => {
+    setError('');
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Microphone access is not available in this browser.');
+      return;
+    }
+
+    setMicrophoneSubmitting(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      setMicrophoneGateRequired(false);
+      bumpBody();
+    } catch {
+      setError('Please allow microphone access to start the voice-agent demo.');
+    } finally {
+      setMicrophoneSubmitting(false);
+    }
+  }, [bumpBody]);
 
   const handleEmailContinue = useCallback(async () => {
     setError('');
@@ -134,15 +173,23 @@ export function OnboardingFlow() {
     await enterPersona(selectedPersonaId);
   }, [enterPersona, selectedPersonaId]);
 
-  const primaryAction = step === 1 ? handleEmailContinue : handlePersonaContinue;
+  const primaryAction = microphoneGateRequired
+    ? handleMicrophonePermission
+    : step === 1
+      ? handleEmailContinue
+      : handlePersonaContinue;
   const continueDisabled =
-    submitting || (step === 2 && !selectedPersonaId) || (step === 1 && !email.trim());
+    microphoneGateRequired
+      ? microphoneSubmitting
+      : submitting || (step === 2 && !selectedPersonaId) || (step === 1 && !email.trim());
   const continueLabel =
-    step === 1
-      ? 'Continue'
-      : selectedPersona
-        ? `Enter as ${selectedPersona.name}`
-        : 'Enter';
+    microphoneGateRequired
+      ? 'Enable microphone'
+      : step === 1
+        ? 'Continue'
+        : selectedPersona
+          ? `Enter as ${selectedPersona.name}`
+          : 'Enter';
 
   return (
     <main className="onb">
@@ -156,21 +203,31 @@ export function OnboardingFlow() {
             type="button"
             className="onb-back"
             onClick={goBack}
-            disabled={step === 1}
+            disabled={microphoneGateRequired || step === 1}
             aria-label="Go back"
           >
             ‹
           </button>
           <span className="onb-step-label">
-            {step} / 2
+            {microphoneGateRequired ? 'Setup' : `${step} / 2`}
           </span>
         </div>
 
         <div
-          className={step === 2 ? 'onb-body onb-body--persona-step' : 'onb-body'}
+          className={step === 2 && !microphoneGateRequired ? 'onb-body onb-body--persona-step' : 'onb-body'}
           key={bodyKey}
         >
-          {step === 1 ? (
+          {microphoneGateRequired ? (
+            <div className="onb-content">
+              <div className="onb-question">
+                <h2>Enable microphone</h2>
+                <p>iPhone and iPad need microphone access before the voice-agent demo can start.</p>
+              </div>
+              <div className="onb-answer">
+                {error ? <p className="onb-error">{error}</p> : null}
+              </div>
+            </div>
+          ) : step === 1 ? (
             <div className="onb-content">
               <div className="onb-question">
                 <h2>Welcome to Stable Money</h2>
@@ -226,10 +283,12 @@ export function OnboardingFlow() {
             className="onb-continue"
             onClick={primaryAction}
             disabled={continueDisabled}
-            aria-busy={submitting}
+            aria-busy={microphoneGateRequired ? microphoneSubmitting : submitting}
           >
             <span className="onb-continue-inner">
-              {submitting ? <span className="onb-continue-spinner" aria-hidden /> : null}
+              {(microphoneGateRequired ? microphoneSubmitting : submitting) ? (
+                <span className="onb-continue-spinner" aria-hidden />
+              ) : null}
               {submitting ? (step === 1 ? 'Saving…' : 'Entering…') : continueLabel}
             </span>
           </button>

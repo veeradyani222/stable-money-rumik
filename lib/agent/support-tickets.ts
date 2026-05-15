@@ -31,21 +31,9 @@ export interface CreateSupportTicketOptions {
 }
 
 function logSupportTicketEmail(
-  event: 'email_send_succeeded' | 'email_send_failed',
-  details: Record<string, unknown>,
+  _event: 'email_send_succeeded' | 'email_send_failed',
+  _details: Record<string, unknown>,
 ): void {
-  const payload = {
-    at: new Date().toISOString(),
-    event,
-    ...details,
-  };
-
-  if (event === 'email_send_failed') {
-    console.error('[support-ticket:email]', payload);
-    return;
-  }
-
-  console.info('[support-ticket:email]', payload);
 }
 
 function normalizeIssue(value: string): string {

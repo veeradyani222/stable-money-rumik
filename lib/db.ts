@@ -12,9 +12,6 @@ export function getPool(): Pool {
       connectionString: databaseUrl,
       ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: false },
     });
-    pool.on('error', (error) => {
-      console.error('[DB] pool_error', error);
-    });
   }
   return pool;
 }

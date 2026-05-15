@@ -92,7 +92,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json(answer);
   } catch (error) {
-    console.error('[agent/respond]', error);
     const message = error instanceof Error ? error.message : 'Could not generate response';
     const status = error instanceof OpenAIRequestError ? error.status : 500;
     return NextResponse.json({ error: message }, { status });

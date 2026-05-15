@@ -52,7 +52,7 @@ test('classifyStableIntentWithAI maps fuzzy Hinglish money issues to a fixed cod
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, 'https://api.openai.com/v1/responses');
   const body = JSON.parse(String(requests[0].init?.body));
-  assert.equal(body.max_output_tokens, 1024);
+  assert.equal(body.max_output_tokens, 8000);
   assert.equal(body.prompt_cache_key, 'stable-intent-classifier-v1');
   assert.equal(body.text.format.type, 'json_schema');
   assert.equal(body.text.format.name, 'stable_intent_classification');
@@ -80,8 +80,50 @@ test('classifyStableIntentWithAI maps fuzzy Hinglish money issues to a fixed cod
     'account.overview',
     'refund.status',
     'secure.action.help',
+    'conversation.goodbye',
     'unknown',
   ]);
+});
+
+test('classifyStableIntentWithAI routes caller farewell to terminal goodbye policy', async () => {
+  resetIntentClassificationCacheForTests();
+  const fetcher = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: JSON.stringify({
+                  intent: 'conversation.goodbye',
+                  auth_tier: 'Tier A',
+                  confidence: 0.94,
+                  reason: 'Caller is ending the conversation.',
+                }),
+              },
+            ],
+          },
+        ],
+      }),
+    }) as Response) as typeof fetch;
+
+  const result = await classifyStableIntentWithAI({
+    apiKey: 'test-openai-key',
+    transcript: 'theek hai thanks, ab main rakhta hoon',
+    history: [],
+    fetcher,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.route, {
+    intent: 'conversation.goodbye',
+    authTier: 'Tier A',
+    tools: [],
+  });
 });
 
 test('AI classifier cannot downgrade a known intent tier or tools', async () => {
@@ -224,7 +266,7 @@ test('classifyStableIntentWithAI retries once when a completed classifier respon
   assert.equal(calls, 2);
   assert.deepEqual(
     requestBodies.map((body) => body.max_output_tokens),
-    [1024, 2048],
+    [8000, 8000],
   );
   assert.equal(result.accepted, true);
   assert.deepEqual(result.route, {
@@ -234,14 +276,8 @@ test('classifyStableIntentWithAI retries once when a completed classifier respon
   });
 });
 
-test('classifyStableIntentWithAI logs OpenAI HTTP failures with useful diagnostics', async () => {
+test('classifyStableIntentWithAI handles OpenAI HTTP failures without console logging', async () => {
   resetIntentClassificationCacheForTests();
-  const originalError = console.error;
-  const logs: unknown[][] = [];
-  console.error = (...args: unknown[]) => {
-    logs.push(args);
-  };
-
   const fetcher = (async () =>
     ({
       ok: false,
@@ -249,24 +285,15 @@ test('classifyStableIntentWithAI logs OpenAI HTTP failures with useful diagnosti
       text: async () => 'upstream overloaded',
     }) as Response) as typeof fetch;
 
-  try {
-    const result = await classifyStableIntentWithAI({
-      apiKey: 'test-openai-key',
-      transcript: 'mujhe mere payments ke bare me batao',
-      history: [{ role: 'user', text: 'hello' }],
-      fetcher,
-    });
+  const result = await classifyStableIntentWithAI({
+    apiKey: 'test-openai-key',
+    transcript: 'mujhe mere payments ke bare me batao',
+    history: [{ role: 'user', text: 'hello' }],
+    fetcher,
+  });
 
-    assert.equal(result.accepted, false);
-    assert.equal(result.reason, 'classifier_status_503');
-    assert.equal(logs.length, 1);
-    assert.equal(logs[0][0], '[stable-agent:intent-classifier]');
-    assert.match(JSON.stringify(logs[0][1]), /classifier_http_error/);
-    assert.match(JSON.stringify(logs[0][1]), /upstream overloaded/);
-    assert.match(JSON.stringify(logs[0][1]), /transcript_chars/);
-  } finally {
-    console.error = originalError;
-  }
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, 'classifier_status_503');
 });
 
 test('resolveStableTurnRoute uses AI as the primary router even when keyword routing would match and caches the result', async () => {

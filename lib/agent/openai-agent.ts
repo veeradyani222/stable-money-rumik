@@ -106,6 +106,18 @@ export interface OpenAIResponse {
   output?: (OpenAIOutputMessage | OpenAIOutputFunctionCall | Record<string, unknown>)[];
 }
 
+export interface AgentTimingEvent {
+  event: string;
+  elapsedMs: number;
+  details?: Record<string, unknown>;
+}
+
+type AgentDebugEvent =
+  | { type: 'route'; route: StableIntentRoute }
+  | { type: 'tool'; tool: string; phase: 'start' | 'result'; [k: string]: unknown }
+  | { type: 'stream'; event: Record<string, unknown> }
+  | { type: 'timing'; timing: AgentTimingEvent };
+
 export class OpenAIRequestError extends Error {
   status: number;
   details: string;
@@ -120,10 +132,10 @@ export class OpenAIRequestError extends Error {
 
 const PROJECT_PROMPT_PATH = path.join(process.cwd(), 'PROJECT.md');
 const RUMIK_PROMPT_PATH = path.join(process.cwd(), 'RUMIK_PROMPT_GUIDE.md');
-export const AGENT_INITIAL_MAX_OUTPUT_TOKENS = 600;
-export const AGENT_RECOVERY_MAX_OUTPUT_TOKENS = 1200;
-export const AGENT_EXTENDED_RECOVERY_MAX_OUTPUT_TOKENS = 2400;
-export const AGENT_MAX_HISTORY_MESSAGES = 16;
+export const AGENT_INITIAL_MAX_OUTPUT_TOKENS = 8000;
+export const AGENT_RECOVERY_MAX_OUTPUT_TOKENS = 8000;
+export const AGENT_EXTENDED_RECOVERY_MAX_OUTPUT_TOKENS = 8000;
+export const AGENT_MAX_HISTORY_MESSAGES = 64;
 
 const BLOCKED_ACCOUNT_TOOL_SUMMARY =
   '[neutral] Is account specific tool ke liye pehle read access verification zaroori hai.';
@@ -329,6 +341,10 @@ function buildTieredRouteInstructions(input: {
 
   if (route.authTier === 'Tier A') {
     lines.push('This turn can be answered without caller verification.');
+    if (route.intent === 'conversation.goodbye') {
+      lines.push('Caller is ending the conversation.');
+      lines.push('Say a short warm goodbye and do not ask a follow-up question.');
+    }
     if (route.intent === 'fd.rates.compare') {
       lines.push('Do not use account tools for this turn unless the caller is already verified for another reason.');
     }
@@ -728,7 +744,7 @@ function stripSensitiveFunctionArguments(event: Record<string, unknown>): Record
   }
 }
 
-function applyStreamEvent(state: StreamState, event: Record<string, unknown>, onDelta?: (delta: string) => void, onDebug?: (event: { type: 'stream'; event: Record<string, unknown> } | { type: 'route'; route: StableIntentRoute } | { type: 'tool'; tool: string; phase: 'start' | 'result'; [k: string]: unknown }) => void): void {
+function applyStreamEvent(state: StreamState, event: Record<string, unknown>, onDelta?: (delta: string) => void, onDebug?: (event: AgentDebugEvent) => void): void {
   onDebug?.({ type: 'stream', event: stripSensitiveFunctionArguments(event) });
   const type = typeof event.type === 'string' ? event.type : '';
 
@@ -861,8 +877,6 @@ export async function runStableAgent(
   }
 
   const route = await resolveRouteForAgent(input);
-  console.info('[stable-agent:route]', { intent: route.intent, auth_tier: route.authTier, call_verified: input.callVerified === true });
-
   const verifiedRef = { current: input.callVerified === true };
   const toolCalls: string[] = [];
 
@@ -970,21 +984,7 @@ export async function runStableAgent(
     const mergedArgs = fc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, rawArgs) : rawArgs;
 
     const execCtx = buildExecutionContext(input, verifiedRef);
-    console.info('[stable-agent:tool]', {
-      phase: 'start',
-      tool: fc.name,
-      auth_tier: authTierForToolLog(route, fc.name),
-      arguments: mergedArgs,
-    });
-
     const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
-
-    console.info('[stable-agent:tool]', {
-      phase: 'result',
-      tool: fc.name,
-      auth_tier: authTierForToolLog(route, fc.name),
-      ok: toolResult.ok,
-    });
 
     toolCalls.push(fc.name);
 
@@ -1038,14 +1038,34 @@ export async function runStableAgent(
 export async function streamStableAgentText(
   input: BuildOpenAIResponseRequestInput,
   onDelta: (delta: string) => void,
-  onDebug?: (event: { type: 'route'; route: StableIntentRoute } | { type: 'tool'; tool: string; phase: 'start' | 'result'; [k: string]: unknown } | { type: 'stream'; event: Record<string, unknown> }) => void,
+  onDebug?: (event: AgentDebugEvent) => void,
 ): Promise<{ text: string; toolCalls: string[]; verified?: boolean }> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error('Missing required environment variable: OPENAI_API_KEY');
   }
 
+  const agentStartedAt = Date.now();
+  const emitTiming = (event: string, details?: Record<string, unknown>) => {
+    onDebug?.({
+      type: 'timing',
+      timing: {
+        event,
+        elapsedMs: Date.now() - agentStartedAt,
+        ...(details ? { details } : {}),
+      },
+    });
+  };
+
+  emitTiming('agent_start', {
+    transcriptChars: input.transcript.length,
+    historyMessages: input.history.length,
+    callVerified: input.callVerified === true,
+  });
+
+  try {
   const route = await resolveRouteForAgent(input);
+  emitTiming('route_resolved', { intent: route.intent, authTier: route.authTier });
   onDebug?.({ type: 'route', route });
 
   const verifiedRef = { current: input.callVerified === true };
@@ -1054,7 +1074,8 @@ export async function streamStableAgentText(
 
   let messages: OpenAIInput[] = buildOpenAIResponseRequest({ ...mergedBase, callVerified: verifiedRef.current }).input;
 
-  const runOneStream = async (onDelta?: (delta: string) => void, onDebug?: (event: { type: 'route'; route: StableIntentRoute } | { type: 'tool'; tool: string; phase: 'start' | 'result'; [k: string]: unknown } | { type: 'stream'; event: Record<string, unknown> }) => void): Promise<{
+  let streamPasses = 0;
+  const runOneStream = async (onDelta?: (delta: string) => void, onDebug?: (event: AgentDebugEvent) => void): Promise<{
     textDeltas: string[];
     incomplete: boolean;
     serverError: boolean;
@@ -1080,10 +1101,36 @@ export async function streamStableAgentText(
       stream: true,
     };
 
+    const pass = streamPasses + 1;
+    streamPasses = pass;
+    emitTiming('openai_stream_request_start', {
+      pass,
+      model: request.model,
+      tools: toolsPayload.map((tool) => tool.name),
+      inputMessages: messages.length,
+    });
     const stream = await createOpenAIResponseStream(apiKey, request);
+    emitTiming('openai_stream_response_ready', { pass });
     onDebug?.({ type: 'stream', event: { type: 'start' } });
     const state: StreamState = { textDeltas: [], incompleteFromStream: false, serverError: false };
-    await readSseStream(stream, (ev) => applyStreamEvent(state, ev, onDelta, onDebug));
+    let sawFirstEvent = false;
+    await readSseStream(stream, (ev) => {
+      if (!sawFirstEvent) {
+        sawFirstEvent = true;
+        emitTiming('openai_stream_first_event', {
+          pass,
+          eventType: typeof ev.type === 'string' ? ev.type : 'unknown',
+        });
+      }
+      applyStreamEvent(state, ev, onDelta, onDebug);
+    });
+    emitTiming('openai_stream_end', {
+      pass,
+      textDeltas: state.textDeltas.length,
+      incomplete: state.incompleteFromStream,
+      serverError: state.serverError,
+      streamedFunction: state.activeFunction?.name,
+    });
     onDebug?.({ type: 'stream', event: { type: 'end', textDeltas: state.textDeltas.length } });
 
     if (state.serverError) {
@@ -1126,6 +1173,7 @@ export async function streamStableAgentText(
       history: input.history,
     });
     const toolsPayload = declarationsForToolNames(toolNames);
+    emitTiming('openai_recovery_request_start', { maxOutputTokens });
     const json = await createOpenAIResponse(apiKey, {
       model: getAgentModel(),
       instructions: buildStableAgentInstructions(merged, toolNames),
@@ -1134,6 +1182,11 @@ export async function streamStableAgentText(
       max_output_tokens: maxOutputTokens,
       reasoning: { effort: 'low' },
       text: { verbosity: 'low' },
+    });
+    emitTiming('openai_recovery_response_ready', {
+      maxOutputTokens,
+      status: json.status,
+      outputItems: json.output?.length ?? 0,
     });
     return normalizeHinglishDobAsk(extractOpenAIText(json));
   };
@@ -1161,7 +1214,9 @@ export async function streamStableAgentText(
     } as { type: 'tool'; tool: string; phase: 'start'; [k: string]: unknown });
 
     const execCtx = buildExecutionContext(input, verifiedRef);
+    emitTiming('tool_execution_start', { tool: fc.name });
     const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
+    emitTiming('tool_execution_end', { tool: fc.name, ok: toolResult.ok });
 
     onDebug?.({
       type: 'tool',
@@ -1239,12 +1294,14 @@ export async function streamStableAgentText(
             return { text: BLOCKED_ACCOUNT_TOOL_SUMMARY, toolCalls: [...toolCalls], verified: verifiedRef.current };
           }
 
+          emitTiming('tool_execution_start', { tool: nextFc.name });
           const nextToolResult = await executeStableToolWithContext(
             input.persona,
             nextFc.name,
             nextFc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, nextRawArgs) : nextRawArgs,
             buildExecutionContext(input, verifiedRef),
           );
+          emitTiming('tool_execution_end', { tool: nextFc.name, ok: nextToolResult.ok });
 
           onDebug?.({
             type: 'tool',
@@ -1325,4 +1382,7 @@ export async function streamStableAgentText(
   }
   pass1.textDeltas.forEach(onDelta);
   return { text: firstText, toolCalls: [], verified: verifiedRef.current };
+  } finally {
+    emitTiming('agent_finish');
+  }
 }

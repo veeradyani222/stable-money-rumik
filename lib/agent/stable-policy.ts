@@ -84,6 +84,7 @@ export type StableIntentId =
   | 'account.overview'
   | 'refund.status'
   | 'secure.action.help'
+  | 'conversation.goodbye'
   | 'unknown';
 
 export interface StableIntentPolicy {
@@ -164,6 +165,10 @@ export const STABLE_INTENT_POLICIES: Record<Exclude<StableIntentId, 'unknown'>, 
   'secure.action.help': {
     authTier: 'Tier C',
     tools: ['send_secure_link', 'create_support_ticket'],
+  },
+  'conversation.goodbye': {
+    authTier: 'Tier A',
+    tools: [],
   },
 } as const;
 
@@ -258,6 +263,7 @@ export function buildStableProjectPromptRules(): string {
     '- fd.rates.compare: no auth, call get_fd_rates, compare only, do not say "best FD".',
     '- app.real.check: no auth, call get_trust_facts and optionally get_disclosure_copy with topic fd. Keep it short and fact-based.',
     '- grievance.escalate: capture issue summary, priority, create_support_ticket, and give ticket ID before ending.',
+    '- conversation.goodbye: caller is ending the conversation; say goodbye briefly, do not use tools, and do not ask another question.',
     '',
     `FD disclosure exact copy: "${DISCLOSURE_COPY.fd}"`,
     `Tax disclaimer exact copy: "${DISCLOSURE_COPY.tax}"`,

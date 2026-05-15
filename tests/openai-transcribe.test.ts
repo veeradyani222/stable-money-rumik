@@ -11,10 +11,8 @@ test('transcribeOpenAIAudio sends webm audio to the configured OpenAI STT model'
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.OPENAI_API_KEY;
   const originalSttModel = process.env.OPENAI_STT_MODEL;
-  const originalInfo = console.info;
 
   const capturedRequests: CapturedRequest[] = [];
-  const logs: unknown[][] = [];
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     capturedRequests.push({
       url: String(url),
@@ -29,9 +27,6 @@ test('transcribeOpenAIAudio sends webm audio to the configured OpenAI STT model'
       json: async () => ({ text: 'haan mujhe fd status chahiye' }),
     } as Response;
   }) as typeof fetch;
-  console.info = (...args: unknown[]) => {
-    logs.push(args);
-  };
 
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.OPENAI_STT_MODEL = 'gpt-4o-transcribe';
@@ -56,10 +51,8 @@ test('transcribeOpenAIAudio sends webm audio to the configured OpenAI STT model'
     assert.match(String(capturedRequest.body.get('prompt')), /Hindi, or Hinglish/);
     assert.match(String(capturedRequest.body.get('prompt')), /Never output Devanagari, Arabic, Urdu, or Farsi script/);
     assert.ok(capturedRequest.body.get('file') instanceof File);
-    assert.deepEqual(logs, []);
   } finally {
     globalThis.fetch = originalFetch;
-    console.info = originalInfo;
     process.env.OPENAI_API_KEY = originalApiKey;
     process.env.OPENAI_STT_MODEL = originalSttModel;
   }
@@ -131,14 +124,12 @@ test('openai transcription route, helper, and call client are wired for OpenAI S
     'utf8',
   );
 
-  assert.match(helperSource, /\[openai-transcribe\]/);
-  assert.match(helperSource, /shouldLogDiagnosticEvent/);
-  assert.match(helperSource, /response:error/);
+  assert.doesNotMatch(helperSource, /console\.(?:log|debug|info|warn|error)\s*\(/);
+  assert.doesNotMatch(helperSource, /shouldLogDiagnosticEvent/);
   assert.doesNotMatch(helperSource, /logOpenAITranscribe\('request:prepared'/);
   assert.doesNotMatch(helperSource, /logOpenAITranscribe\('response:success'/);
-  assert.match(routeSource, /shouldLogDiagnosticEvent/);
-  assert.match(routeSource, /request:invalid/);
-  assert.match(routeSource, /response:error/);
+  assert.doesNotMatch(routeSource, /console\.(?:log|debug|info|warn|error)\s*\(/);
+  assert.doesNotMatch(routeSource, /shouldLogDiagnosticEvent/);
   assert.doesNotMatch(routeSource, /logOpenAITranscribeRoute\('request:received'/);
   assert.doesNotMatch(routeSource, /logOpenAITranscribeRoute\('response:success'/);
   assert.match(clientSource, /\/api\/voice\/openai-transcribe/);

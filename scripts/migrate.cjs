@@ -9,9 +9,6 @@ function loadDatabaseUrlFromEnvLocal() {
   if (!fs.existsSync(envPath)) return;
   const fileText = fs.readFileSync(envPath, 'utf8');
   if (!fileText.trim()) {
-    console.warn(
-      'Warning: .env.local exists but is empty on disk. Save your editor buffer (Ctrl+S), then rerun migrate.',
-    );
     return;
   }
   const lines = fileText.split('\n');
@@ -36,7 +33,6 @@ loadDatabaseUrlFromEnvLocal();
 
 const url = process.env.DATABASE_URL;
 if (!url) {
-  console.error('DATABASE_URL not found. Set it in .env.local or in the environment.');
   process.exit(1);
 }
 
@@ -51,12 +47,10 @@ const client = new Client({
 async function main() {
   await client.connect();
   await client.query(sql);
-  console.log('Migration OK: table demo_users is ready.');
   await client.end();
 }
 
-main().catch((err) => {
-  console.error('Migration failed:', err.message || err);
+main().catch(() => {
   client.end().catch(() => {});
   process.exit(1);
 });

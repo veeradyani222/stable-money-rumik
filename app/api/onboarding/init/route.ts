@@ -50,7 +50,6 @@ export async function POST(request: Request) {
     });
     return response;
   } catch (error) {
-    console.error('[onboarding/init]', error);
     const message = error instanceof Error ? error.message : 'Database error';
     const isMissingTable = message.includes('does not exist') || message.includes('relation "demo_users"');
     return NextResponse.json(

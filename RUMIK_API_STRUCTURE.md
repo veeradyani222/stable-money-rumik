@@ -418,7 +418,7 @@ async function streamTTS(text) {
     } else {
       const msg = JSON.parse(event.data);
       if (msg.type === "done") {
-        console.log(`Done: ${msg.audio_duration}s audio`);
+        ws.close();
       }
     }
   };
@@ -461,8 +461,6 @@ async function streamTTS(text) {
     } else {
       const msg = JSON.parse(data.toString());
       if (msg.type === "done") {
-        const total = chunks.reduce((a, c) => a + c.length, 0);
-        console.log(`Done: ${msg.audio_duration}s, ${total} bytes`);
         ws.close();
       }
     }

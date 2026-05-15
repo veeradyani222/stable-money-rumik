@@ -1,4 +1,3 @@
-import { shouldLogDiagnosticEvent } from '@/lib/diagnostics/log-filter';
 import { normalizeOpenAITranscript } from '@/lib/voice/transcript-text';
 
 interface OpenAITranscribeResponse {
@@ -20,15 +19,6 @@ export class OpenAITranscribeError extends Error {
 export const OPENAI_ROMAN_TRANSCRIPT_PROMPT =
   'Transcribe the complete user utterance from this call audio. The speaker may use English, Hindi, or Hinglish. Return natural Roman-script text preserving their meaning. Use Latin letters for Hindi/Hinglish. Never output Devanagari, Arabic, Urdu, or Farsi script. Return only transcript text, no markdown, no labels. Do not omit any words. Do not add any words. If the audio is not clear, return your best guess for the complete utterance.';
 
-function logOpenAITranscribe(event: string, details?: Record<string, unknown>) {
-  if (!shouldLogDiagnosticEvent({ event })) return;
-
-  console.info('[openai-transcribe]', event, {
-    at: new Date().toISOString(),
-    ...(details ?? {}),
-  });
-}
-
 function getSttModel(): string {
   return process.env.OPENAI_STT_MODEL || 'gpt-4o-mini-transcribe';
 }
@@ -40,7 +30,6 @@ export async function transcribeOpenAIAudio(input: {
 }): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    logOpenAITranscribe('config:missing-api-key');
     const message = 'Missing required environment variable: OPENAI_API_KEY';
     throw new OpenAITranscribeError(500, message, message);
   }
@@ -62,11 +51,6 @@ export async function transcribeOpenAIAudio(input: {
 
   if (!response.ok) {
     const details = await response.text();
-    logOpenAITranscribe('response:error', {
-      model,
-      status: response.status,
-      detailsPreview: details.slice(0, 400),
-    });
     throw new OpenAITranscribeError(response.status, details);
   }
 

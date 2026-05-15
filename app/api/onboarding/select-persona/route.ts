@@ -128,8 +128,7 @@ export async function POST(request: Request) {
     if (result.rowCount === 0) {
       return NextResponse.json({ error: 'Session not found' }, { status: 404 });
     }
-  } catch (error) {
-    console.error('[onboarding/select-persona]', error);
+  } catch {
     return NextResponse.json({ error: 'Could not save persona. Try again.' }, { status: 500 });
   }
 

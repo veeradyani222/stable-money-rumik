@@ -47,8 +47,7 @@ export async function GET(request: Request) {
       brief: buildPersonaBrief(persona),
       suggestions: getPersonaSuggestions(persona),
     });
-  } catch (error) {
-    console.error('[agent/session]', error);
+  } catch {
     return NextResponse.json({ error: 'Could not load agent session' }, { status: 500 });
   }
 }

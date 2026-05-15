@@ -7,6 +7,18 @@ const clientSource = fs.readFileSync(
   path.join(process.cwd(), 'components', 'agent', 'AgentCallClient.tsx'),
   'utf8',
 );
+const respondStreamSource = fs.readFileSync(
+  path.join(process.cwd(), 'app', 'api', 'agent', 'respond-stream', 'route.ts'),
+  'utf8',
+);
+const openAiAgentSource = fs.readFileSync(
+  path.join(process.cwd(), 'lib', 'agent', 'openai-agent.ts'),
+  'utf8',
+);
+const timingLogRouteSource = fs.readFileSync(
+  path.join(process.cwd(), 'app', 'api', 'voice', 'timing-log', 'route.ts'),
+  'utf8',
+);
 
 test('agent call client prewarms and reuses one Rumik socket across turns', () => {
   assert.match(clientSource, /ensureRumikSocket/);
@@ -55,21 +67,142 @@ test('agent call client prefetches randomized thinking filler audio before turns
   assert.ok(prefetchIndex < askAgentIndex);
 });
 
-test('agent call client starts answer audio before the thinking filler finishes', () => {
+test('cached thinking fillers keep the original stable copy', () => {
+  const fillerBlockMatch = clientSource.match(/const STABLE_THINKING_FILLERS = \[([\s\S]*?)\] as const;/);
+  assert.ok(fillerBlockMatch);
+  const fillers = [...fillerBlockMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+
+  assert.deepEqual(fillers, [
+    '[neutral] Ek minute dijiye, main system mein iski details nikalti hoon aur aapko batati hoon. Wait karne ke liye thank you',
+    '[neutral] Okay, main abhi check kar leti hoon aur aapko batati hoon. Thank you for your understanding.',
+  ]);
+});
+
+test('agent call client reports voice timing milestones to the timing route without console logging', () => {
+  assert.doesNotMatch(timingLogRouteSource, /console\./);
+  assert.match(clientSource, /postVoiceTiming/);
+  assert.match(clientSource, /event: 'transcript_ready'/);
+  assert.match(clientSource, /event: 'agent_fetch_start'/);
+  assert.match(clientSource, /event: 'filler_playback_start'/);
+  assert.match(clientSource, /event: 'filler_playback_end'/);
+  assert.match(clientSource, /event: 'agent_first_delta'/);
+  assert.match(clientSource, /event: 'agent_first_speakable_chunk'/);
+  assert.match(clientSource, /event: 'rumik_answer_text_sent'/);
+  assert.match(clientSource, /event: 'rumik_answer_first_audio_packet'/);
+  assert.match(clientSource, /event: 'rumik_answer_first_audio_scheduled'/);
+  assert.match(clientSource, /queueMs/);
+  assert.match(clientSource, /delayMs/);
+  assert.match(clientSource, /\/api\/voice\/timing-log/);
+});
+
+test('respond stream sends terminal turn policy from server route metadata', () => {
+  assert.match(respondStreamSource, /event: 'policy'/);
+  assert.match(respondStreamSource, /suppressFiller/);
+  assert.match(respondStreamSource, /endCallAfterResponse/);
+  assert.match(respondStreamSource, /conversation\.goodbye/);
+});
+
+test('respond stream sends server agent timing milestones over SSE without console logging', () => {
+  assert.doesNotMatch(respondStreamSource, /console\./);
+  assert.match(respondStreamSource, /debugEvent\.type === 'timing'/);
+  assert.match(openAiAgentSource, /agent_start/);
+  assert.match(openAiAgentSource, /route_resolved/);
+  assert.match(openAiAgentSource, /openai_stream_request_start/);
+  assert.match(openAiAgentSource, /openai_stream_response_ready/);
+  assert.match(openAiAgentSource, /openai_stream_first_event/);
+  assert.match(openAiAgentSource, /openai_stream_end/);
+  assert.match(openAiAgentSource, /agent_finish/);
+});
+
+test('agent call client starts cached thinking filler immediately after the agent stream request', () => {
+  const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
+  const fetchIndex = clientSource.indexOf("fetch('/api/agent/respond-stream'", askAgentIndex);
+  const fillerIndex = clientSource.indexOf('const thinkingFillerPlayback = playThinkingFillerAudio()', fetchIndex);
+  const warmIndex = clientSource.indexOf('warmRumikSocket();', fetchIndex);
+  const readStreamIndex = clientSource.indexOf('readAgentResponseStream(', fetchIndex);
+  const policyGateIndex = clientSource.indexOf('const turnPolicy = createTurnPolicyGate', askAgentIndex);
+
+  assert.notEqual(askAgentIndex, -1);
+  assert.notEqual(fetchIndex, -1);
+  assert.notEqual(fillerIndex, -1);
+  assert.notEqual(warmIndex, -1);
+  assert.notEqual(readStreamIndex, -1);
+  assert.equal(policyGateIndex, -1);
+  assert.ok(fetchIndex < fillerIndex);
+  assert.ok(fillerIndex < readStreamIndex);
+  assert.ok(fetchIndex < warmIndex);
+});
+
+test('agent call client starts the agent stream before warming Rumik voice', () => {
+  const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
+  const fetchIndex = clientSource.indexOf("fetch('/api/agent/respond-stream'", askAgentIndex);
+  const warmIndex = clientSource.indexOf('warmRumikSocket();', askAgentIndex);
+
+  assert.notEqual(askAgentIndex, -1);
+  assert.notEqual(fetchIndex, -1);
+  assert.notEqual(warmIndex, -1);
+  assert.ok(fetchIndex < warmIndex);
+});
+
+test('agent call client ends terminal goodbye turns after response playback finishes', () => {
+  const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
+  const waitForBothIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, playbackQueue]);', askAgentIndex);
+  const waitForTurnIndex = clientSource.indexOf('await waitForRumikPlaybackTurn();', waitForBothIndex);
+  const terminalEndIndex = clientSource.indexOf('if (data.endCallAfterResponse', waitForTurnIndex);
+  const endCallIndex = clientSource.indexOf('endCall();', terminalEndIndex);
+
+  assert.notEqual(askAgentIndex, -1);
+  assert.notEqual(waitForBothIndex, -1);
+  assert.notEqual(waitForTurnIndex, -1);
+  assert.notEqual(terminalEndIndex, -1);
+  assert.notEqual(endCallIndex, -1);
+  assert.ok(waitForBothIndex < waitForTurnIndex);
+  assert.ok(waitForTurnIndex < terminalEndIndex);
+  assert.ok(terminalEndIndex < endCallIndex);
+});
+
+test('agent call client queues answer audio without cutting the thinking filler mid-sentence', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
   const fillerIndex = clientSource.indexOf('const thinkingFillerPlayback = playThinkingFillerAudio()', askAgentIndex);
   const queueIndex = clientSource.indexOf('let playbackQueue = Promise.resolve();', fillerIndex);
-  const noResetIndex = clientSource.indexOf('playRumikText(chunk, { resetPlayback: false, waitForCompletion: false })', queueIndex);
-  const waitForBothIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, playbackQueue]);', noResetIndex);
+  const firstChunkIndex = clientSource.indexOf('if (!isFirstStreamChunk)', queueIndex);
+  const queueAfterFillerIndex = clientSource.indexOf("playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' })", firstChunkIndex);
+  const waitForBothIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, playbackQueue]);', queueAfterFillerIndex);
+  const firstChunkSource = clientSource.slice(firstChunkIndex, waitForBothIndex);
 
   assert.notEqual(askAgentIndex, -1);
   assert.notEqual(fillerIndex, -1);
   assert.notEqual(queueIndex, -1);
-  assert.notEqual(noResetIndex, -1);
+  assert.notEqual(firstChunkIndex, -1);
+  assert.notEqual(queueAfterFillerIndex, -1);
   assert.notEqual(waitForBothIndex, -1);
   assert.ok(fillerIndex < queueIndex);
-  assert.ok(queueIndex < noResetIndex);
-  assert.ok(noResetIndex < waitForBothIndex);
+  assert.ok(queueIndex < queueAfterFillerIndex);
+  assert.ok(queueAfterFillerIndex < waitForBothIndex);
+  assert.doesNotMatch(firstChunkSource, /cutActiveThinkingFiller/);
+  assert.doesNotMatch(firstChunkSource, /resetPlayback: true/);
+});
+
+test('agent call client queues fallback answers before waiting for the thinking filler to finish', () => {
+  const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
+  const fallbackIndex = clientSource.indexOf("fetch('/api/agent/respond'", askAgentIndex);
+  const speakAnswerIndex = clientSource.indexOf("const answerPlayback = playRumikText(answer, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });", fallbackIndex);
+  const waitForBothIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, answerPlayback]);', speakAnswerIndex);
+  const waitForTurnIndex = clientSource.indexOf('await waitForRumikPlaybackTurn();', waitForBothIndex);
+  const fallbackEndIndex = clientSource.indexOf('return;', waitForTurnIndex);
+  const fallbackSource = clientSource.slice(fallbackIndex, fallbackEndIndex);
+
+  assert.notEqual(askAgentIndex, -1);
+  assert.notEqual(fallbackIndex, -1);
+  assert.notEqual(speakAnswerIndex, -1);
+  assert.notEqual(waitForBothIndex, -1);
+  assert.notEqual(waitForTurnIndex, -1);
+  assert.notEqual(fallbackEndIndex, -1);
+  assert.ok(speakAnswerIndex < waitForBothIndex);
+  assert.ok(waitForBothIndex < waitForTurnIndex);
+  assert.doesNotMatch(fallbackSource, /cutActiveThinkingFiller/);
+  assert.doesNotMatch(fallbackSource, /resetPlayback: true/);
+  assert.doesNotMatch(fallbackSource, /await thinkingFillerPlayback;/);
 });
 
 test('agent call client prefers cached opening playback instead of regenerating it on start', () => {
@@ -149,43 +282,39 @@ test('agent call client exposes an accessible mobile persona drawer handle and o
 });
 
 test('agent call client starts a fresh microphone recorder after confirmed speech', () => {
-  const speechStartIndex = clientSource.indexOf("logVoiceDebug('vad:speech-start'");
-  const recorderStartIndex = clientSource.indexOf('utteranceRecorder.start(240)', speechStartIndex - 500);
+  const recorderStartIndex = clientSource.indexOf('utteranceRecorder.start(240)');
+  const listeningIndex = clientSource.indexOf('setIsListening(true);', recorderStartIndex);
 
-  assert.notEqual(speechStartIndex, -1);
   assert.notEqual(recorderStartIndex, -1);
-  assert.ok(recorderStartIndex < speechStartIndex);
+  assert.notEqual(listeningIndex, -1);
+  assert.ok(recorderStartIndex < listeningIndex);
 });
 
 test('agent call client stops the utterance recorder before uploading audio', () => {
-  const speechEndIndex = clientSource.indexOf("logVoiceDebug('vad:speech-end'");
-  const stopIndex = clientSource.indexOf('currentRecorder.stop()', speechEndIndex);
-  const flushIndex = clientSource.indexOf('void flushUtterance()', speechEndIndex);
+  const captureEndIndex = clientSource.lastIndexOf('isCapturingUtteranceRef.current = false;');
+  const stopIndex = clientSource.indexOf('currentRecorder.stop()', captureEndIndex);
+  const flushIndex = clientSource.indexOf('void flushUtterance()', captureEndIndex);
 
-  assert.notEqual(speechEndIndex, -1);
+  assert.notEqual(captureEndIndex, -1);
   assert.notEqual(stopIndex, -1);
   assert.notEqual(flushIndex, -1);
   assert.ok(stopIndex < flushIndex);
 });
 
-test('agent call client logs demo voice debug events and errors', () => {
+test('agent call client keeps runtime source free of console logging', () => {
   assert.match(clientSource, /logVoiceDebug/);
-  assert.match(clientSource, /\[voice-debug\]/);
-  assert.match(clientSource, /shouldLogDiagnosticEvent/);
-  assert.match(clientSource, /console\.info\('\[voice-debug\]'/);
+  assert.doesNotMatch(clientSource, /console\.(?:log|debug|info|warn|error)\s*\(/);
   assert.match(clientSource, /rumik:socket:error/);
   assert.match(clientSource, /rumik:send:error/);
   assert.match(clientSource, /rumik:message:text:parse-error/);
   assert.match(clientSource, /realtime:sdp:error/);
   assert.match(clientSource, /agent:error/);
-  assert.doesNotMatch(clientSource, /console\.(?:log|debug|info|warn|error)\([^)]*token/);
 });
 
-test('agent call client prints agent route and tool decisions to the browser console', () => {
-  assert.match(clientSource, /message\.event === 'route'/);
-  assert.match(clientSource, /console\.info\('\[stable-agent:route\]', message\.data\)/);
-  assert.match(clientSource, /message\.event === 'tool'/);
-  assert.match(clientSource, /console\.info\('\[stable-agent:tool\]', message\.data\)/);
+test('agent call client consumes agent route and tool SSE events without console logging', () => {
+  assert.doesNotMatch(clientSource, /\[stable-agent:route\]/);
+  assert.doesNotMatch(clientSource, /\[stable-agent:tool\]/);
+  assert.doesNotMatch(clientSource, /console\.(?:log|debug|info|warn|error)\s*\(/);
 });
 
 test('agent call client trims silent Rumik lead-in packets before speech starts', () => {
@@ -205,7 +334,7 @@ test('agent call client speaks final done-only answers from tool-backed response
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
   const appendAgentIndex = clientSource.indexOf("appendTranscript('agent', answer);", askAgentIndex);
   const awaitPlaybackIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, playbackQueue]);', appendAgentIndex);
-  const doneAnswerSpeakIndex = clientSource.indexOf("logVoiceDebug('agent:stream:done-answer-speakable'", askAgentIndex);
+  const doneAnswerSpeakIndex = clientSource.indexOf('if (!hasQueuedStreamAudio && answer)', askAgentIndex);
 
   assert.notEqual(askAgentIndex, -1);
   assert.notEqual(appendAgentIndex, -1);
