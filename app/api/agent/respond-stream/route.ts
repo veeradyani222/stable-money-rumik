@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     const pool = getPool();
     const verifiedMobileLast4 = await getDemoCallVerifiedMobileLastFourFromStore(pool, sessionId, callId);
     const result = await pool.query(
-      `SELECT persona_id, customer_id, name, mobile_last_4, date_of_birth,
+      `SELECT persona_id, customer_id, name, mobile_last_4, date_of_birth::text AS date_of_birth,
         kyc_status, kyc_rejection_reason, kyc_eta, kyc_next_step,
         payments, fixed_deposits, open_tickets, secure_links
        FROM demo_users

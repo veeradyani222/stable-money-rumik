@@ -1,7 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { buildPersonaFromDemoUserRow } from '../lib/demo-users';
+
+const agentSessionRouteSource = fs.readFileSync(
+  path.join(process.cwd(), 'app', 'api', 'agent', 'session', 'route.ts'),
+  'utf8',
+);
+const agentRespondRouteSource = fs.readFileSync(
+  path.join(process.cwd(), 'app', 'api', 'agent', 'respond', 'route.ts'),
+  'utf8',
+);
+const agentRespondStreamRouteSource = fs.readFileSync(
+  path.join(process.cwd(), 'app', 'api', 'agent', 'respond-stream', 'route.ts'),
+  'utf8',
+);
 
 test('buildPersonaFromDemoUserRow returns the persisted editable persona fields', () => {
   const persona = buildPersonaFromDemoUserRow({
@@ -54,4 +69,11 @@ test('buildPersonaFromDemoUserRow falls back to seed data when editable JSON is 
   assert.ok(persona);
   assert.equal(persona.name, 'Arjun Kapoor');
   assert.equal(persona.fixed_deposits.length, 2);
+});
+
+test('agent routes read SQL DATE values as text to avoid timezone-shifted DOBs', () => {
+  for (const source of [agentSessionRouteSource, agentRespondRouteSource, agentRespondStreamRouteSource]) {
+    assert.match(source, /date_of_birth::text AS date_of_birth/);
+    assert.doesNotMatch(source, /mobile_last_4, date_of_birth,/);
+  }
 });

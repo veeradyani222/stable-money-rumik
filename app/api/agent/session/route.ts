@@ -17,7 +17,7 @@ export async function GET(request: Request) {
   try {
     const pool = getPool();
     const result = await pool.query(
-      `SELECT email, persona_id, customer_id, name, mobile_last_4, date_of_birth,
+      `SELECT email, persona_id, customer_id, name, mobile_last_4, date_of_birth::text AS date_of_birth,
         kyc_status, kyc_rejection_reason, kyc_eta, kyc_next_step,
         payments, fixed_deposits, open_tickets, secure_links
        FROM demo_users
