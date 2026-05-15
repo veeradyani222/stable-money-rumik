@@ -1,0 +1,30 @@
+{
+  "name": "stable-money-rumik",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "migrate": "node scripts/migrate.cjs",
+    "dev": "next dev",
+    "build": "next build",
+    "test": "tsx --test \"tests/**/*.test.ts\"",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "livekit-server-sdk": "^2.15.3",
+    "next": "15.3.6",
+    "pg": "^8.20.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "15.3.6",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}

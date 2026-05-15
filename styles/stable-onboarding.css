@@ -1,0 +1,420 @@
+/* Stable Money onboarding extensions — uses Bloom theme tokens */
+
+.onb-body--persona-step {
+  flex-direction: column;
+  align-items: stretch;
+  padding-top: 12px;
+}
+
+.onb-body--persona-step .onb-content {
+  max-width: 100%;
+  width: 100%;
+  text-align: left;
+  align-items: stretch;
+}
+
+.onb-body--persona-step .onb-question {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.onb-body--persona-step .onb-question h2,
+.onb-body--persona-step .onb-question p {
+  text-align: left;
+}
+
+@media (min-width: 768px) {
+  .onb-body--persona-step .onb-content {
+    text-align: center;
+    align-items: stretch;
+  }
+
+  .onb-body--persona-step .onb-question {
+    align-items: center;
+    text-align: center;
+  }
+
+  .onb-body--persona-step .onb-question h2,
+  .onb-body--persona-step .onb-question p {
+    text-align: center;
+  }
+}
+
+.persona-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .persona-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+}
+
+.persona-card {
+  cursor: default;
+  text-align: left;
+  min-height: 0;
+}
+
+.persona-card__body {
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  min-height: 120px;
+  box-shadow: 0 4px 12px var(--card-shadow);
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.persona-card:hover .persona-card__body {
+  border-color: var(--primary);
+  transform: translateY(-2px);
+}
+
+.persona-card__name {
+  font-family: 'Cinzel', serif;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text);
+  line-height: 1.25;
+  margin: 0;
+}
+
+.persona-card__scenario {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 0;
+  flex: 1;
+}
+
+.onb-continue-inner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.onb-continue-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--gold-faint);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: onb-spin 0.8s linear infinite;
+}
+
+.agent-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  padding: clamp(12px, 2vh, 32px);
+  font-family: 'DM Sans', sans-serif;
+}
+
+.agent-card {
+  width: 100%;
+  max-width: 460px;
+  border-radius: 28px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: clamp(24px, 4vh, 40px);
+  box-sizing: border-box;
+  box-shadow: 0 16px 48px var(--card-shadow);
+}
+
+@media (max-width: 767px) {
+  .agent-card {
+    border-radius: 0;
+    border: none;
+    max-width: 100%;
+  }
+}
+
+.agent-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  text-align: center;
+}
+
+.agent-loading h1 {
+  font-family: 'Cinzel', serif;
+  font-size: clamp(1.3rem, 4vw, 1.75rem);
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.agent-loading p {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* Persona card — view details (does not select card) */
+.persona-card__details-btn {
+  margin-top: 10px;
+  align-self: flex-start;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--primary);
+  background: var(--gold-faint);
+  color: var(--primary);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+}
+
+.persona-card__details-btn:hover {
+  background: var(--primary);
+  color: var(--bg-dark);
+}
+
+.persona-card__details-btn:active {
+  transform: scale(0.98);
+}
+
+/* Full-details modal (Bloom tone) */
+.persona-modal-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(26, 10, 46, 0.4);
+  backdrop-filter: blur(4px);
+  animation: onb-fadeIn 0.25s ease;
+}
+
+.persona-modal-panel {
+  width: 100%;
+  max-width: 520px;
+  max-height: min(88vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  box-shadow: 0 16px 48px var(--card-shadow);
+  overflow: hidden;
+  animation: onb-fadeIn 0.3s ease;
+}
+
+.persona-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.persona-modal-title-block {
+  min-width: 0;
+}
+
+.persona-modal-title {
+  margin: 0 0 6px;
+  font-family: 'Cinzel', serif;
+  font-size: clamp(1.25rem, 3.5vw, 1.5rem);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.persona-modal-sub {
+  margin: 0 0 10px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.persona-modal-close {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--primary);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.persona-modal-close:hover {
+  background: var(--gold-faint);
+  border-color: var(--primary);
+}
+
+.persona-modal-body {
+  padding: 12px 18px 8px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.persona-modal-section {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.persona-modal-section:last-child {
+  border-bottom: none;
+}
+
+.persona-modal-section-title {
+  margin: 0 0 10px;
+  font-family: 'Cinzel', serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+
+.persona-modal-dl {
+  margin: 0;
+}
+
+.persona-modal-row {
+  display: grid;
+  grid-template-columns: minmax(0, 34%) minmax(0, 66%);
+  gap: 10px 14px;
+  padding: 6px 0;
+  align-items: start;
+}
+
+.persona-modal-row--pre {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 10px 0;
+}
+
+.persona-modal-row dt {
+  margin: 0;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.74rem;
+  font-weight: 800;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+}
+
+.persona-modal-row dd {
+  margin: 0;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.84rem;
+  color: var(--text);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.persona-modal-dd--pre {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.persona-modal-dd--pre::first-line {
+  font-weight: 800;
+}
+
+.persona-modal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 14px 18px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.persona-modal-btn {
+  padding: 10px 22px;
+  border-radius: 0;
+  border: 0.5px solid var(--text);
+  font-family: 'Cinzel', serif;
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+  font-weight: 600;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.persona-modal-btn--ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+.persona-modal-btn--ghost:hover {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.persona-modal-btn--primary {
+  background: transparent;
+  color: var(--primary);
+}
+
+.persona-modal-btn--primary:hover {
+  background: var(--gold-faint);
+  color: var(--text);
+}
+
+@media (max-width: 520px) {
+  .persona-modal-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .persona-modal-footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .persona-modal-btn {
+    width: 100%;
+    text-align: center;
+  }
+}
