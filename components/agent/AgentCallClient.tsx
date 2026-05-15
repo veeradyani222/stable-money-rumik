@@ -90,12 +90,12 @@ const RUMIK_MAX_LEADING_SILENCE_DROPS = 20;
 const OPENING_AUDIO_CACHE_TIMEOUT_MS = 12000;
 const USE_OPENAI_REALTIME_TRANSCRIPTION = true;
 const STABLE_THINKING_FILLERS = [
-  '[neutral] Ek minute dijiye, main system mein iski details nikalti hoon aur aapko batati hoon. Wait karne ke liye thank you',
-  '[neutral] Okay, main abhi check kar leti hoon aur aapko batati hoon. Samajhne ke liye shukriya.',
-  '[neutral] Ji theek hai, main dekh kar bata deti hoon.',
-  '[neutral] Kripya thoda sa wait kijiye, main abhi system check karke aapko complete information deti hoon. Aapke patience ke liye thank you.',
-  '[neutral] Bas ek moment dijiye, main details verify karke turant aapko update karti hoon. Wait karne ke liye dhanyavaad.',
-  '[neutral] Thodi der ka samay dijiye, main abhi records check karke aapko sahi jaankari batati hoon. Aapke cooperation ke liye thank you.',
+ '[neutral] Ek minute, main check karti hoon.',
+'[neutral] Okay, main abhi dekh kar batati hoon.',
+'[neutral] Ji, main dekh kar batati hoon.',
+'[neutral] Thoda wait kijiye, main system check karti hoon.',
+'[neutral] Bas ek moment, main details dekh leti hoon.',
+'[neutral] Main records check karke batati hoon.',
 ] as const;
 const AGENT_CLIENT_HISTORY_LIMIT = 16;
 /** Ringtones: MP3 only, from `public/assets/` → `/assets/…` */

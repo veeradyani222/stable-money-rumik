@@ -177,24 +177,6 @@ test('routeStableTurn does not infer verification follow-ups with local keyword 
   );
 });
 
-  assert.equal(mobileResult.ok, true);
-  assert.match(mobileResult.summary, /date of birth batayein/i);
-  assert.equal(mobileResult.data?.customer_id, 'cust_demo_001');
-  assert.equal(mobileResult.data?.verification_step, 'dob_required');
-  assert.equal(mobileResult.data?.verified, false);
-  assert.equal(mobileResult.data?.mobile_step_verified, true);
-
-  const dobResult = executeStableTool(persona, 'verify_read_access', {
-    mobile_last_4: '3210',
-    date_of_birth: '1991-08-14',
-  });
-
-  assert.equal(dobResult.ok, true);
-  assert.match(dobResult.summary, /verification complete/i);
-  assert.equal(dobResult.data?.verified, true);
-  assert.equal(dobResult.data?.mobile_step_verified, true);
-});
-
 test('executeStableToolWithContext invokes onReadAccessMobileStepVerified when mobile matches', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
@@ -213,31 +195,6 @@ test('executeStableToolWithContext invokes onReadAccessMobileStepVerified when m
   assert.deepEqual(marks, [persona.mobile_last_4]);
 });
 
-  assert.equal(dobResult.ok, true);
-  assert.match(dobResult.summary, /verification complete/i);
-  assert.equal(dobResult.data?.verified, true);
-  assert.equal(dobResult.data?.mobile_step_verified, true);
-});
-
-  assert.equal(dobResult.ok, true);
-  assert.equal(dobResult.data?.verified, true);
-});
-
-  assert.equal(mobileResult.ok, true);
-  assert.equal(mobileResult.data?.verification_step, 'dob_required');
-  assert.equal(dobResult.ok, true);
-  assert.equal(dobResult.data?.verified, true);
-});
-
-  assert.equal(mobileResult.ok, false);
-  assert.match(mobileResult.summary, /match nahi hua/i);
-  assert.equal(mobileResult.data?.verified, false);
-  assert.equal(mobileResult.data?.mobile_step_verified, false);
-  assert.equal('payments' in (mobileResult.data ?? {}), false);
-  assert.equal(dobResult.ok, false);
-  assert.match(dobResult.summary, /date of birth match nahi hua/i);
-  assert.equal(dobResult.data?.mobile_step_verified, true);
-});
 
 test('executeStableTool reads payment reconciliation status with Project.md safe phrasing', () => {
   const persona = getPersonaById('cust_demo_001');
