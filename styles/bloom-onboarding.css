@@ -724,15 +724,16 @@ textarea.onb-text-input {
 /* ── Mobile: plain, no box, smaller fonts ────────── */
 @media (max-width: 767px) {
   .onb {
-    padding: 0;
-    align-items: flex-start;
+    padding: 16px;
+    align-items: center;
   }
 
   .onb-card {
-    border-radius: 0;
-    border: none;
+    border-radius: 12px;
+    border: 1px solid var(--border);
     background: var(--surface);
     width: 100%;
+    max-height: calc(100vh - 32px);
   }
 
   .onb-body {

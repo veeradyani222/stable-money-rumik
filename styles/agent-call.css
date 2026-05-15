@@ -739,6 +739,10 @@
     padding-top: max(28px, env(safe-area-inset-top));
   }
 
+  .voice-call-stack {
+    padding-bottom: 10vh;
+  }
+
   .persona-panel {
     position: fixed;
     top: 0;

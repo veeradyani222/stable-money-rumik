@@ -705,6 +705,15 @@ export function AgentCallClient() {
   useEffect(() => {
     callStateRef.current = callState;
     logVoiceDebug('call:state', { callState });
+
+    if (callState !== 'idle' && typeof window !== 'undefined') {
+      setTimeout(() => {
+        window.scrollTo({
+          top: document.body.scrollHeight,
+          behavior: 'smooth',
+        });
+      }, 100);
+    }
   }, [callState]);
 
   useEffect(() => {

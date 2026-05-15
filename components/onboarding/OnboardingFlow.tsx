@@ -174,7 +174,7 @@ export function OnboardingFlow() {
             <div className="onb-content">
               <div className="onb-question">
                 <h2>Welcome to Stable Money</h2>
-                <p>Enter your work email to start the voice-agent demo.</p>
+                <p>Enter your email to start the voice-agent demo.</p>
               </div>
               <div className="onb-answer">
                 <label className="visually-hidden" htmlFor="onb-email">
@@ -186,7 +186,7 @@ export function OnboardingFlow() {
                   name="email"
                   autoComplete="email"
                   className="onb-text-input"
-                  placeholder="you@company.com"
+                  placeholder="you@mail.com"
                   value={email}
                   disabled={submitting}
                   onChange={(e) => {
