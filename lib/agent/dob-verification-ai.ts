@@ -116,19 +116,13 @@ export async function matchCallerDobWithPersonaAi(input: DobAiMatchInput): Promi
     instructions: [
       'You verify whether a banking support caller stated their date of birth matching an internal record.',
       'The record_date_iso is the canonical calendar date on file (YYYY-MM-DD, no time zone).',
-      'Decide if the caller clearly expressed that same calendar day, including very loose phrasing in English, Hindi, or Hinglish. Accept any ordering of day, month, and year. Accept ordinals (1st, 2nd, 26th), month names (full or short), Hindi/Hinglish month words (e.g. agast, sitambar, navambar, disambar, janvari, farvari), filler words between parts (such as "of the month", "saal", "year", "month", "tareekh"), and numeric, slash, dash, or dot separators.',
-      'Examples that should resolve when they match the record: "Year 1993, 29th of the month July." → 1993-07-29; "uneenees sau ninety three, July ki 29 tareekh" → 1993-07-29; "29-07-1993", "29/07/93", "twenty ninth July nineteen ninety three", "July twenty nine ninety three" → 1993-07-29.',
-      'verdict=match when the caller clearly conveys that exact calendar day in any ordering or phrasing.',
-      'verdict=no_match when the caller clearly conveys a different specific calendar day.',
-      'You are the sole verifier. Do not hedge. Always return match or no_match if any date is inferable.',
-      'verdict=unclear only when no calendar date can be reasonably inferred, when there are multiple conflicting dates in the same utterance, or when the utterance is clearly not a date at all (e.g. only an age, only a zodiac, gibberish).',
-      'Do not match based on age alone, zodiac alone, or partial guesses (e.g. only a year).',
+      'Decide if the caller clearly expressed that same calendar day, including very loose phrasing in English, Hindi, or Hinglish, urdu devnagri arabic anything. Use your intelligence, youre very smart for this task.',
       'Ignore politeness fillers; focus on the date content.',
     ].join('\n'),
     max_output_tokens: 8000,
     stream: false,
     ...(isReasoningModel(dobModel) ? { reasoning: { effort: 'low' } } : {}),
-    prompt_cache_key: 'stable-dob-verification-v1',
+    prompt_cache_key: 'stable-dob-verification-v2',
     text: {
       format: {
         type: 'json_schema',
