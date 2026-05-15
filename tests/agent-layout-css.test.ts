@@ -12,3 +12,17 @@ test('agent page keeps sidebar scrolling inside the viewport', () => {
   assert.match(css, /\.persona-panel\s*{[\s\S]*?overflow:\s*hidden;/);
   assert.match(css, /\.panel-section\s*{[\s\S]*?overflow:\s*auto;/);
 });
+
+test('agent page turns the persona panel into a phone side drawer', () => {
+  const mobileStart = css.indexOf('@media (max-width: 900px)');
+  const mobileSource = css.slice(mobileStart);
+
+  assert.notEqual(mobileStart, -1);
+  assert.match(mobileSource, /\.agent-page\s*{[\s\S]*?grid-template-columns:\s*1fr;/);
+  assert.match(mobileSource, /\.voice-stage\s*{[\s\S]*?height:\s*100vh;/);
+  assert.match(mobileSource, /\.persona-panel\s*{[\s\S]*?position:\s*fixed;[\s\S]*?right:\s*0;[\s\S]*?transform:\s*translateX\(100%\);/);
+  assert.match(mobileSource, /\.agent-page--panel-open\s+\.persona-panel\s*{[\s\S]*?transform:\s*translateX\(0\);/);
+  assert.match(mobileSource, /\.mobile-panel-handle\s*{[\s\S]*?display:\s*inline-grid;/);
+  assert.match(mobileSource, /\.agent-page--panel-open\s+\.mobile-panel-backdrop\s*{[\s\S]*?display:\s*block;/);
+  assert.doesNotMatch(mobileSource, /\.mobile-panel-close\s*{/);
+});

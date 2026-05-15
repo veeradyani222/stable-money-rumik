@@ -7,6 +7,7 @@ import {
   type AgentHistoryMessage,
 } from '@/lib/agent/openai-agent';
 import { createSupportTicketForSession } from '@/lib/agent/support-tickets';
+import { sendSecureLinkForSession } from '@/lib/agent/secure-links';
 import { getPool } from '@/lib/db';
 import { buildPersonaFromDemoUserRow } from '@/lib/demo-users';
 import {
@@ -80,6 +81,7 @@ export async function POST(request: Request) {
       classifyUnknownIntent: true,
       toolContext: {
         createSupportTicket: (args) => createSupportTicketForSession(sessionId, args),
+        sendSecureLink: (args) => sendSecureLinkForSession(sessionId, args),
         verifiedMobileLast4: verifiedMobileLast4 ?? undefined,
         onReadAccessMobileStepVerified: (lastFour) => {
           markDemoCallVerifiedMobileLastFour(sessionId, callId, lastFour);

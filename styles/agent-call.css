@@ -124,6 +124,38 @@
   stroke-linejoin: round;
 }
 
+.mobile-panel-handle,
+.mobile-panel-backdrop {
+  display: none;
+}
+
+.mobile-panel-handle {
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 8px 0 0 8px;
+  background: rgba(201, 168, 124, 0.1);
+  color: var(--primary);
+  cursor: pointer;
+  transition: all var(--transition-base);
+}
+
+.mobile-panel-handle:hover {
+  background: rgba(201, 168, 124, 0.18);
+  border-color: var(--primary);
+  transform: translateX(-2px);
+}
+
+.mobile-panel-handle svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .voice-call-round-btn svg {
   width: 28px;
   height: 28px;
@@ -702,19 +734,55 @@
   }
 
   .voice-stage {
-    height: 62vh;
+    height: 100vh;
     min-height: 0;
+    padding-top: max(28px, env(safe-area-inset-top));
   }
 
   .persona-panel {
-    height: 38vh;
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 20;
+    width: min(86vw, 390px);
+    height: 100vh;
     min-height: 0;
-    border-left: none;
-    border-top: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+    border-top: none;
+    box-shadow: -24px 0 48px rgba(0, 0, 0, 0.28);
+    transform: translateX(100%);
+    transition: transform 0.24s ease;
+  }
+
+  .agent-page--panel-open .persona-panel {
+    transform: translateX(0);
   }
 
   .persona-panel__resize-edge {
     display: none;
+  }
+
+  .mobile-panel-handle {
+    position: fixed;
+    top: max(82px, calc(env(safe-area-inset-top) + 68px));
+    right: 0;
+    z-index: 14;
+    display: inline-grid;
+    place-items: center;
+  }
+
+  .agent-page--panel-open .mobile-panel-handle {
+    display: none;
+  }
+
+  .agent-page--panel-open .mobile-panel-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    display: block;
+    border: 0;
+    background: rgba(0, 0, 0, 0.16);
+    cursor: default;
   }
 
   .voice-orb {

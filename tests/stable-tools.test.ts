@@ -474,6 +474,33 @@ test('executeStableToolWithContext enforces Tier B auth for account reads but al
   assert.equal(verified.data?.payment_reference, 'PAY-8831');
 });
 
+test('executeStableToolWithContext invokes secure link side effect from context', async () => {
+  const persona = getPersonaById('cust_demo_004');
+  assert.ok(persona);
+  const calls: Record<string, unknown>[] = [];
+
+  const result = await executeStableToolWithContext(
+    persona,
+    'send_secure_link',
+    { action: 'premature_withdrawal', fd_id: 'FD-4412' },
+    {
+      callVerified: true,
+      sendSecureLink: async (args) => {
+        calls.push(args);
+        return {
+          ok: true,
+          summary: '[neutral] premature withdrawal ke liye secure link email bhej diya.',
+          data: { email_sent: true, email_to: 'customer@example.com' },
+        };
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.email_sent, true);
+  assert.deepEqual(calls, [{ action: 'premature_withdrawal', fd_id: 'FD-4412' }]);
+});
+
 test('executeStableToolWithContext accepts DOB when AI says match (mocked)', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);

@@ -40,6 +40,7 @@ export interface StableToolExecutionContext {
   /** Fired when mobile last four matched and DOB is still required or failed; used to persist the gate. */
   onReadAccessMobileStepVerified?: (lastFour: string) => void;
   createSupportTicket?: (args: { issue: string; priority: 'low' | 'medium' | 'high' }) => Promise<StableToolResult>;
+  sendSecureLink?: (args: { action: string; fd_id?: string }) => Promise<StableToolResult>;
   /** When true, `executeStableToolWithContext` uses parse-only DOB matching (unit tests). */
   skipAiDobVerification?: boolean;
   /** Optional fetch override for AI DOB verification (tests). */
@@ -144,7 +145,6 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
       reference: { description: 'Optional payment reference, UTR, alias, source bank, or amount', optional: true },
     },
   },
-
   {
     name: 'get_fd_rates',
     description: 'General FD rate comparison data. This must not be used to recommend one FD.',
@@ -156,7 +156,7 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
   },
   {
     name: 'create_support_ticket',
-    description: 'Create or reuse a complaint, grievance, or escalation ticket and return a ticket ID.',
+    description: 'Create or reuse a complaint, grievance, or escalation ticket, queue a confirmation email, and return a ticket ID.',
     authTier: 'Tier A/B',
     parameters: {
       issue: 'Short issue summary',
@@ -165,7 +165,7 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
   },
   {
     name: 'send_secure_link',
-    description: 'Prepare a secure link follow-up for actions that must not be completed on voice.',
+    description: 'Email a secure link follow-up for actions that must not be completed on voice.',
     authTier: 'Tier C',
     parameters: {
       action: 'Action name such as premature_withdrawal',
@@ -182,8 +182,8 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
 
 const legacyToolAliases: Record<string, string> = {
   check_payment_status: 'get_payment_reconciliation_status',
-  check_kyc_status: 'get_kyc_status',
   check_fd_status: 'get_fd_booking_status',
+  check_kyc_status: 'get_kyc_status',
   check_ticket_status: 'get_support_ticket_status',
   get_ticket_status: 'get_support_ticket_status',
   prepare_secure_link: 'send_secure_link',
@@ -361,36 +361,7 @@ function verifyReadAccessMobilePhase(
   return { kind: 'check_dob', raw: String(args.date_of_birth) };
 }
 
-function verifyDobAgainstPersonaDeterministic(persona: PersonaSeed, rawDob: string): StableToolResult {
-  const parsedDob = parseCallerDobToIsoDate(rawDob);
-  if (!parsedDob.ok) {
-    return {
-      ok: false,
-      summary:
-        '[neutral] Ek baar phir clearly bata dijiye, date, month aur year.',
-      data: {
-        auth_tier: 'Tier B',
-        verification_step: 'dob_required',
-        verified: false,
-        mobile_step_verified: true,
-        dob_parse_failed: true,
-      },
-    };
-  }
-
-  if (parsedDob.isoDate !== persona.date_of_birth) {
-    return {
-      ok: false,
-      summary: '[neutral] Date of birth match nahi hua. Ek baar phir date of birth batayein.',
-      data: {
-        auth_tier: 'Tier B',
-        verification_step: 'dob_required',
-        verified: false,
-        mobile_step_verified: true,
-      },
-    };
-  }
-
+function completeDobVerification(persona: PersonaSeed): StableToolResult {
   return {
     ok: true,
     summary: '[neutral] Date of birth match ho gaya. Verification complete hai.',
@@ -403,6 +374,40 @@ function verifyDobAgainstPersonaDeterministic(persona: PersonaSeed, rawDob: stri
       mobile_step_verified: true,
     },
   };
+}
+
+function dobMismatchResult(): StableToolResult {
+  return {
+    ok: false,
+    summary: '[neutral] Date of birth match nahi hua. Ek baar phir date of birth batayein.',
+    data: {
+      auth_tier: 'Tier B',
+      verification_step: 'dob_required',
+      verified: false,
+      mobile_step_verified: true,
+    },
+  };
+}
+
+function dobParseFailedResult(): StableToolResult {
+  return {
+    ok: false,
+    summary: '[neutral] Ek baar phir clearly bata dijiye, date, month aur year.',
+    data: {
+      auth_tier: 'Tier B',
+      verification_step: 'dob_required',
+      verified: false,
+      mobile_step_verified: true,
+      dob_parse_failed: true,
+    },
+  };
+}
+
+function verifyDobAgainstPersonaDeterministic(persona: PersonaSeed, rawDob: string): StableToolResult {
+  const parsedDob = parseCallerDobToIsoDate(rawDob);
+  if (!parsedDob.ok) return dobParseFailedResult();
+  if (parsedDob.isoDate !== persona.date_of_birth) return dobMismatchResult();
+  return completeDobVerification(persona);
 }
 
 function verifyReadAccess(
@@ -438,48 +443,14 @@ async function verifyReadAccessWithAi(
       fetcher: context.fetcher,
     });
 
-    if (ai.verdict === 'match') {
-      return {
-        ok: true,
-        summary: '[neutral] Date of birth match ho gaya. Verification complete hai.',
-        data: {
-          auth_tier: 'Tier B',
-          customer_id: persona.customer_id,
-          name: persona.name,
-          verification_step: 'complete',
-          verified: true,
-          mobile_step_verified: true,
-        },
-      };
-    }
+    if (ai.verdict === 'match') return completeDobVerification(persona);
 
     if (ai.verdict === 'no_match') {
       const parsedFallback = parseCallerDobToIsoDate(raw);
       if (parsedFallback.ok && parsedFallback.isoDate === persona.date_of_birth) {
-        return {
-          ok: true,
-          summary: '[neutral] Date of birth match ho gaya. Verification complete hai.',
-          data: {
-            auth_tier: 'Tier B',
-            customer_id: persona.customer_id,
-            name: persona.name,
-            verification_step: 'complete',
-            verified: true,
-            mobile_step_verified: true,
-          },
-        };
+        return completeDobVerification(persona);
       }
-
-      return {
-        ok: false,
-        summary: '[neutral] Date of birth match nahi hua. Ek baar phir date of birth batayein.',
-        data: {
-          auth_tier: 'Tier B',
-          verification_step: 'dob_required',
-          verified: false,
-          mobile_step_verified: true,
-        },
-      };
+      return dobMismatchResult();
     }
   }
 
@@ -491,8 +462,7 @@ function legacyDobVerification(persona: PersonaSeed, args: Record<string, unknow
   if (!parsedDob.ok) {
     return {
       ok: false,
-      summary:
-        '[neutral] Ek baar phir clearly bata dijiye, date, month aur year.',
+      summary: '[neutral] Ek baar phir clearly bata dijiye, date, month aur year.',
       data: {
         verification_step: 'dob_required',
         verified: false,
@@ -702,22 +672,16 @@ function executeFdSummary(persona: PersonaSeed): StableToolResult {
   };
 }
 
-function executeKycStatus(persona: PersonaSeed): StableToolResult {
-  const tail =
-    persona.kyc_next_step ??
-    persona.kyc_rejection_reason ??
-    persona.kyc_eta ??
-    'Abhi koi action needed nahi hai.';
+function executeAccountOverview(persona: PersonaSeed): StableToolResult {
   return {
     ok: true,
-    summary: `[neutral] Aapka KYC ${spokenStatus(persona.kyc_status)} hai. ${rumikSafeCopy(tail)}`,
+    summary: `[neutral] Aapka account overview yeh hai. KYC ${spokenStatus(persona.kyc_status)} hai. Fixed deposits ${persona.fixed_deposits.length} hain, payments ${persona.payments.length} hain, aur open tickets ${persona.open_tickets.length} hain.`,
     data: {
-      intent_id: 'kyc.status',
+      intent_id: 'account.overview',
       kyc_status: persona.kyc_status,
-      kyc_next_step: persona.kyc_next_step,
-      kyc_eta: persona.kyc_eta,
-      kyc_rejection_reason: persona.kyc_rejection_reason,
-      canonical_sla: persona.kyc_status === 'pending_review' ? CANONICAL_SLAS.kyc_pending_review : null,
+      fixed_deposit_count: persona.fixed_deposits.length,
+      payment_count: persona.payments.length,
+      open_ticket_count: persona.open_tickets.length,
     },
   };
 }
@@ -781,6 +745,23 @@ function executeSecureLink(persona: PersonaSeed, args: Record<string, unknown>):
     data: {
       ...link,
       voice_execution_allowed: false,
+    },
+  };
+}
+
+function executeKycStatus(persona: PersonaSeed): StableToolResult {
+  return {
+    ok: true,
+    summary: `[neutral] Aapka KYC ${spokenStatus(persona.kyc_status)} hai. ${rumikSafeCopy(
+      persona.kyc_next_step || persona.kyc_rejection_reason || persona.kyc_eta || 'Abhi koi action needed nahi hai.',
+    )}`,
+    data: {
+      intent_id: 'kyc.status',
+      kyc_status: persona.kyc_status,
+      kyc_next_step: persona.kyc_next_step,
+      kyc_eta: persona.kyc_eta,
+      kyc_rejection_reason: persona.kyc_rejection_reason,
+      canonical_sla: persona.kyc_status === 'pending_review' ? CANONICAL_SLAS.kyc_pending_review : null,
     },
   };
 }
@@ -895,7 +876,7 @@ function executeSupportTicketStatus(persona: PersonaSeed, args: Record<string, u
 
   return {
     ok: false,
-    summary: '[neutral] Is demo customer ke liye koi open support ticket nahi mila.',
+    summary: '[neutral] Aap ke liye koi open support ticket nahi mila.',
     data: {
       intent_id: 'ticket.status',
       match_count: 0,
@@ -976,7 +957,8 @@ export function executeStableTool(
     case 'get_refund_status':
       return executeRefundStatus(persona, args);
 
-
+    case 'get_account_overview':
+      return executeAccountOverview(persona);
 
     case 'get_fd_rates':
       return executeFdRates(args);
@@ -1030,6 +1012,12 @@ export async function executeStableToolWithContext(
 
   if (canonical === 'create_support_ticket' && context.createSupportTicket) {
     return context.createSupportTicket(supportTicketArgs(args));
+  }
+
+  if (canonical === 'send_secure_link' && context.sendSecureLink) {
+    const action = typeof args.action === 'string' && args.action.trim() ? args.action.trim() : 'premature_withdrawal';
+    const fdId = typeof args.fd_id === 'string' && args.fd_id.trim() ? args.fd_id.trim() : undefined;
+    return context.sendSecureLink({ action, ...(fdId ? { fd_id: fdId } : {}) });
   }
 
   let result: StableToolResult;

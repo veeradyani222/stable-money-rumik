@@ -1,5 +1,4 @@
 import type { PersonaSeed } from '@/lib/personas';
-import { STABLE_DEFAULT_OPENING_TEXT } from '@/lib/agent/stable-call-copy';
 import {
   executeStableToolWithContext,
   getStableToolAuthTier,
@@ -30,6 +29,7 @@ export interface BuildOpenAIResponseRequestInput {
   classifyUnknownIntent?: boolean;
   toolContext?: {
     createSupportTicket?: StableToolExecutionContext['createSupportTicket'];
+    sendSecureLink?: StableToolExecutionContext['sendSecureLink'];
     verifiedMobileLast4?: string | null;
     onReadAccessMobileStepVerified?: StableToolExecutionContext['onReadAccessMobileStepVerified'];
   };
@@ -191,6 +191,11 @@ function isDobVerificationInProgress(history: AgentHistoryMessage[], toolContext
   return /mobile last four match|date of birth match nahi|date of birth|DOB/i.test(tail);
 }
 
+function isSupportTicketIssueAnswer(history: AgentHistoryMessage[]): boolean {
+  const modelText = lastModelText(history);
+  return /(ticket|support).*(issue|problem|dikkat|pareshani|kya hua|kis baare mein)/i.test(modelText) || /ticket kis issue|which issue.*ticket|what issue.*ticket|issue ke liye create/i.test(modelText);
+}
+
 function inferRouteFromLocalContext(input: BuildOpenAIResponseRequestInput): StableIntentRoute {
   const bundle = [...input.history.map((m) => m.text), input.transcript].join('\n');
   const lower = bundle.toLowerCase();
@@ -216,6 +221,9 @@ function inferRouteFromLocalContext(input: BuildOpenAIResponseRequestInput): Sta
 
 async function resolveRouteForAgent(input: BuildOpenAIResponseRequestInput): Promise<StableIntentRoute> {
   if (input.route) return input.route;
+  if (isSupportTicketIssueAnswer(input.history)) {
+    return { intent: 'grievance.escalate', ...getStableIntentPolicy('grievance.escalate') };
+  }
   const apiKey = process.env.OPENAI_API_KEY;
   if (input.classifyUnknownIntent && apiKey) {
     return resolveStableTurnRoute({ apiKey, transcript: input.transcript, history: input.history });
@@ -245,6 +253,10 @@ function selectToolNamesForRequest(input: {
 }): string[] {
   const { route, callVerified, toolContext, transcript, history } = input;
   const policyTools = [...route.tools];
+
+  if (isSupportTicketIssueAnswer(history)) {
+    return ['create_support_ticket'];
+  }
 
   if (route.intent === 'unknown' && route.tools.length === 0) {
     if (toolContext?.verifiedMobileLast4) {
@@ -325,7 +337,9 @@ function buildTieredRouteInstructions(input: {
   if (route.authTier === 'Tier B' && !callVerified && !toolContext?.verifiedMobileLast4) {
     lines.push('Current turn is Tier B and caller is not verified.');
     lines.push('Do not use account tools until verify_read_access succeeds for this session.');
-    lines.push('Ask for mobile last four digits first, then ask for date of birth in natural words.');
+    lines.push('Ask only for the registered mobile number last four digits on this turn.');
+    lines.push('Do not ask for date of birth in the same reply as the mobile last-four request.');
+    lines.push('Ask for date of birth only after the mobile last-four step has matched.');
     lines.push('Never say DOB aloud; say date of birth in full words.');
     lines.push('Apni date of birth batayein in natural conversational Hinglish.');
     lines.push('Never ask for a specific date format, Y words, rigid separators, or digit-heavy templates.');
@@ -343,6 +357,11 @@ function buildTieredRouteInstructions(input: {
     if (toolNames.includes('verify_read_access') && toolNames.length > 1) {
       lines.push('When the caller gives last four digits, call verify_read_access before other account tools.');
     }
+    if (toolNames.includes('create_support_ticket') && isSupportTicketIssueAnswer(history)) {
+      lines.push('Caller is answering what issue the support ticket is for.');
+      lines.push('Do not switch this turn into a KYC status lookup or another account-status lookup.');
+      lines.push('Use the latest caller turn as the support ticket issue and call create_support_ticket.');
+    }
   } else {
     lines.push('Do not use account tools on this turn unless policy explicitly allows Tier A tools.');
   }
@@ -358,7 +377,7 @@ function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, t
   const blocks: string[] = [
     'You are Stable Assist, a calm Indian female voice support executive for Stable Money.',
     'Speak in natural Hinglish only, using Roman script. Keep replies short for a live call.',
-    `Call opening reference (do not read seed customer facts aloud): ${STABLE_DEFAULT_OPENING_TEXT}`,
+    'The app handles the scripted call opening separately. Never repeat the welcome, recording notice, or menu of things you can help with after the caller asks a task.',
     'Do not wait for the caller to speak first.',
     'Demo verification: Selected demo persona is available only for verification and tool execution.',
     'Fixed auth tier routing is owned by code; follow the current turn route and allowed tools.',
@@ -371,11 +390,18 @@ function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, t
     'Voice output is synthesized by Rumik; keep wording speakable and telephony-safe.',
     'Do not ask the caller to read an OTP aloud.',
     'The verify_read_access tool may include internal fields such as mobile_step_verified; never read those field names aloud to the caller.',
+    'For complaints, escalations, grievances, failed follow-ups, or raise-a-ticket requests, call create_support_ticket.',
+    'If the caller only asks to create a support ticket but gives no issue context, ask what issue the ticket is for and do not call create_support_ticket yet.',
+    'If the caller gives the ticket issue, briefly acknowledge before tool use: Main samajh gayi, main support ticket create kar deti hoon.',
+    'After create_support_ticket succeeds with email_pending: true, say only: Support ticket create ho gaya hai. Confirmation email thodi der mein aa jayega.',
+    'For Tier C secure actions, after required verification and any quote or status check, call send_secure_link.',
+    'Do not say an email was sent unless the tool result data says email_sent: true.',
+    'If a secure link tool returns email_sent: false, say the link is ready but email abhi nahi bhej paayi.',
     'Payment reassurance phrases you may use when payment is stressful (Roman script, Hinglish): aapka paisa safe hai; worst case mein refund mil jayega, koi loss nahi hoga.',
     `Money anxiety acknowledgement line (Hinglish, use when payment callers sound stressed): Main samajh sakti hoon ki aap pareshan hain. Main abhi status check karke batati hoon.`,
     `FD rate compare line (English, speak in Hinglish naturally): ${PROJECT_EXACT_LINES.rateCompare}`,
     `FD rate compare Hinglish anchor: Main rates compare karne mein help kar sakti hoon, par main koi ek specific FD recommend nahi kar sakti.`,
-    'Namaste, Stable Money support par aapka swagat hai appears in the scripted opening; keep later turns consistent with that voice.',
+    'For task turns, answer directly without restarting the call opening.',
     ...buildTieredRouteInstructions({ route, callVerified, toolNames, toolContext: merged.toolContext, transcript: merged.transcript, history: merged.history }),
     buildStableProjectPromptRules(),
   ];
@@ -388,7 +414,7 @@ function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, t
     const projectMd = fs.readFileSync(PROJECT_PROMPT_PATH, 'utf8');
     const safeProjectLines = projectMd
       .split('\n')
-      .filter((line) => !/cust_demo_|PAY-\d+|FD-\d+|TKT-\d+|Ananya Sharma|Shriram Finance/i.test(line))
+      .filter((line) => !/cust_demo_|PAY-\d+|FD-\d+|TKT-\d+|Ananya Sharma|Shriram Finance|Namaste, Stable Money support par aapka swagat hai|call quality purposes ke liye record/i.test(line))
       .slice(0, 220);
     blocks.push('Project operating constraints (truncated):\n' + safeProjectLines.join('\n'));
   } catch {
@@ -815,6 +841,7 @@ function buildExecutionContext(
     verifiedMobileLast4: input.toolContext?.verifiedMobileLast4 ?? undefined,
     onReadAccessMobileStepVerified: input.toolContext?.onReadAccessMobileStepVerified,
     createSupportTicket: input.toolContext?.createSupportTicket,
+    sendSecureLink: input.toolContext?.sendSecureLink,
     skipAiDobVerification: input.skipAiDobVerification === true || process.env.STABLE_DISABLE_AI_DOB === '1',
   };
 }
@@ -987,8 +1014,7 @@ export async function runStableAgent(
       fc.name !== 'verify_read_access' &&
       toolResult.ok &&
       !forceNoTools &&
-      fc.name !== 'send_secure_link' &&
-      fc.name !== 'create_support_ticket';
+      fc.name !== 'send_secure_link';
 
     if (skipFinalOpenAi) {
       let spoken = toolResult.summary;
@@ -1069,7 +1095,7 @@ export async function streamStableAgentText(
         type: 'function_call',
         name: state.activeFunction.name,
         arguments: state.activeFunction.arguments,
-        call_id: state.activeFunction.callId,
+        call_id: state.activeFunction.callId || `streamed_${state.activeFunction.name}`,
       });
       if (norm) {
         return {
@@ -1166,8 +1192,93 @@ export async function streamStableAgentText(
     }
 
     if (fc.name === 'verify_read_access') {
+      const verificationSucceeded = toolResult.data?.verified === true;
       if (toolResult.data?.verified === true || (toolResult.ok && process.env.STABLE_DISABLE_AI_DOB === '1')) {
         verifiedRef.current = true;
+      }
+      if (verificationSucceeded && route.tools.some((tool) => tool !== 'verify_read_access')) {
+        messages = [
+          ...messages,
+          { type: 'function_call', call_id: fc.call_id, name: fc.name, arguments: fc.arguments ?? '{}' },
+          { type: 'function_call_output', call_id: fc.call_id, output: JSON.stringify(toolResult) },
+        ];
+
+        const nextPass = await runOneStream(undefined, onDebug);
+        if (nextPass.serverError) {
+          const recovered = await recoverTextWithoutStreaming(AGENT_INITIAL_MAX_OUTPUT_TOKENS);
+          onDelta(recovered);
+          return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
+        }
+
+        if (nextPass.streamedFunction) {
+          const nextFc = nextPass.streamedFunction;
+          const nextRawArgs = parseToolArguments(nextFc.arguments);
+          const nextDebugArgs = { ...nextRawArgs } as Record<string, unknown>;
+          onDebug?.({
+            type: 'tool',
+            tool: nextFc.name,
+            phase: 'start',
+            arguments: nextDebugArgs,
+            verified: verifiedRef.current,
+          } as { type: 'tool'; tool: string; phase: 'start'; [k: string]: unknown });
+
+          const nextAllowed = expandAllowedToolNames(
+            route,
+            selectToolNamesForRequest({
+              route,
+              callVerified: sessionCallVerified(input, verifiedRef),
+              toolContext: input.toolContext,
+              transcript: input.transcript,
+              history: input.history,
+            }),
+            input.callVerified === true,
+          );
+
+          if (!nextAllowed.has(nextFc.name)) {
+            onDelta(BLOCKED_ACCOUNT_TOOL_SUMMARY);
+            return { text: BLOCKED_ACCOUNT_TOOL_SUMMARY, toolCalls: [...toolCalls], verified: verifiedRef.current };
+          }
+
+          const nextToolResult = await executeStableToolWithContext(
+            input.persona,
+            nextFc.name,
+            nextFc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, nextRawArgs) : nextRawArgs,
+            buildExecutionContext(input, verifiedRef),
+          );
+
+          onDebug?.({
+            type: 'tool',
+            tool: nextFc.name,
+            phase: 'result',
+            ok: nextToolResult.ok,
+            verified: nextToolResult.data?.verified === true,
+          } as { type: 'tool'; tool: string; phase: 'result'; [k: string]: unknown });
+
+          toolCalls.push(nextFc.name);
+          let nextSpoken = nextToolResult.summary;
+          if (nextToolResult.ok && isPaymentReconciliationTool(nextFc.name)) {
+            nextSpoken = formatPaymentToolSummary(nextToolResult.summary, { reassurance: false });
+          }
+          nextSpoken = normalizeHinglishDobAsk(nextSpoken);
+          onDelta(nextSpoken);
+          return { text: nextSpoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
+        }
+
+        if (nextPass.incomplete) {
+          const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
+          onDelta(recovered);
+          return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
+        }
+
+        const nextText = normalizeHinglishDobAsk(nextPass.textDeltas.join('').trim());
+        if (nextText) {
+          nextPass.textDeltas.forEach(onDelta);
+          return { text: nextText, toolCalls: [...toolCalls], verified: verifiedRef.current };
+        }
+
+        const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
+        onDelta(recovered);
+        return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
       }
       let spoken = normalizeHinglishDobAsk(toolResult.summary);
       if (

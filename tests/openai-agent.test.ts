@@ -8,6 +8,7 @@ import {
   runStableAgent,
   streamStableAgentText,
 } from '../lib/agent/openai-agent';
+import { stableToolDeclarations } from '../lib/agent/stable-tools';
 import { getStableIntentPolicy, type StableIntentId, type StableIntentRoute } from '../lib/agent/stable-policy';
 
 function testRoute(intent: Exclude<StableIntentId, 'unknown'>): StableIntentRoute {
@@ -32,10 +33,12 @@ test('buildOpenAIResponseRequest includes persona context, tools, and short-call
   assert.match(request.instructions, /Do not ask.*OTP/i);
   assert.match(request.instructions, /Demo verification/i);
   assert.match(request.instructions, /Every call starts unverified/i);
-  assert.match(request.instructions, /Ask for mobile last four/i);
+  assert.match(request.instructions, /Ask only for the registered mobile number last four digits on this turn/i);
   assert.match(request.instructions, /verify_read_access/i);
   assert.match(request.instructions, /get_payment_reconciliation_status/i);
   assert.match(request.instructions, /get_fd_booking_status/i);
+  assert.match(request.instructions, /Do not ask for date of birth in the same reply as the mobile last-four request/i);
+  assert.match(request.instructions, /Ask for date of birth only after the mobile last-four step has matched/i);
   assert.match(request.instructions, /Apni date of birth batayein/i);
   assert.match(request.instructions, /Never say DOB/i);
   assert.match(request.instructions, /mobile_step_verified/i);
@@ -53,7 +56,9 @@ test('buildOpenAIResponseRequest includes persona context, tools, and short-call
   assert.match(request.instructions, /Never mention internal mechanics/i);
   assert.match(request.instructions, /aapka paisa safe hai/);
   assert.match(request.instructions, /worst case mein refund mil jayega, koi loss nahi hoga/);
-  assert.match(request.instructions, /Namaste, Stable Money support par aapka swagat hai/i);
+  assert.match(request.instructions, /Never repeat the welcome, recording notice, or menu of things you can help with/i);
+  assert.match(request.instructions, /For task turns, answer directly without restarting the call opening/i);
+  assert.doesNotMatch(request.instructions, /Namaste, Stable Money support par aapka swagat hai/i);
   assert.match(request.instructions, /Do not wait for the caller to speak first/i);
   assert.match(request.instructions, /Hard Rumik speech output rule/i);
   assert.match(request.instructions, /never contains semicolons, forward slashes, backslashes, brackets, or numeric digits/i);
@@ -106,7 +111,8 @@ test('buildOpenAIResponseRequest gives explicit Tier B verification instructions
 
   assert.match(request.instructions, /Current turn route: payment\.failed, Tier B/i);
   assert.match(request.instructions, /Current turn is Tier B and caller is not verified/i);
-  assert.match(request.instructions, /Ask for mobile last four/i);
+  assert.match(request.instructions, /Ask only for the registered mobile number last four digits on this turn/i);
+  assert.match(request.instructions, /Do not ask for date of birth in the same reply as the mobile last-four request/i);
   assert.match(request.instructions, /After verification, answer the original request using the allowed account tool/i);
   assert.doesNotMatch(request.instructions, /This current turn is Tier B, so verify read access/i);
 });
@@ -313,6 +319,72 @@ test('buildOpenAIResponseRequest gives explicit Tier C secure-action instruction
   assert.match(request.instructions, /Do not execute the sensitive action on voice/i);
   assert.match(request.instructions, /prepare secure link or ticket/i);
   assert.doesNotMatch(request.instructions, /This current turn is Tier C, so verify read access/i);
+});
+
+test('agent prompt and tool declarations require real email side effects for tickets and secure links', () => {
+  const persona = getPersonaById('cust_demo_004');
+  assert.ok(persona);
+
+  const request = buildOpenAIResponseRequest({
+    persona,
+    transcript: 'Raise a complaint and send me the secure withdrawal link',
+    history: [],
+    callVerified: true,
+    route: testRoute('fd.withdraw.premature'),
+  });
+  const createTicket = stableToolDeclarations.find((tool) => tool.name === 'create_support_ticket');
+  const secureLink = stableToolDeclarations.find((tool) => tool.name === 'send_secure_link');
+
+  assert.match(createTicket?.description ?? '', /email/i);
+  assert.match(secureLink?.description ?? '', /email/i);
+  assert.match(request.instructions, /call create_support_ticket/i);
+  assert.match(request.instructions, /complaints, escalations, grievances/i);
+  assert.match(request.instructions, /call send_secure_link/i);
+  assert.match(request.instructions, /Do not say an email was sent unless/i);
+  assert.match(request.instructions, /email_pending: true/i);
+  assert.match(request.instructions, /Confirmation email thodi der mein aa jayega/i);
+});
+
+test('agent prompt requires issue context before creating a support ticket', () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const request = buildOpenAIResponseRequest({
+    persona,
+    transcript: 'Support ticket create kar do',
+    history: [],
+    route: {
+      intent: 'unknown',
+      authTier: 'Tier A/B',
+      tools: ['create_support_ticket'],
+    },
+  });
+
+  assert.match(request.instructions, /If the caller only asks to create a support ticket/i);
+  assert.match(request.instructions, /ask what issue/i);
+  assert.match(request.instructions, /do not call create_support_ticket yet/i);
+  assert.match(request.instructions, /Main samajh gayi/i);
+  assert.match(request.instructions, /create kar deti hoon/i);
+  assert.match(request.instructions, /Confirmation email thodi der mein aa jayega/i);
+});
+
+test('agent keeps support ticket creation active after asking what issue the ticket is for', () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const request = buildOpenAIResponseRequest({
+    persona,
+    transcript: 'Actually, my KYC has been rejected and I gave the right documents, so please help me.',
+    history: [
+      { role: 'user', text: 'Support ticket create kar do' },
+      { role: 'model', text: '[neutral] Theek hai, bataiye ticket kis issue ke liye create karu?' },
+    ],
+    route: testRoute('kyc.status'),
+  });
+
+  assert.deepEqual(request.tools?.map((tool) => tool.name), ['create_support_ticket']);
+  assert.match(request.instructions, /Caller is answering what issue the support ticket is for/i);
+  assert.match(request.instructions, /Do not switch this turn into a KYC status lookup/i);
 });
 
 test('buildOpenAIResponseRequest keeps verified callers behind tool-only account reads', () => {
@@ -1902,6 +1974,178 @@ test('streamStableAgentText fills empty DOB verification args from the current t
     assert.match(JSON.stringify(debugEvents), /"date_of_birth":"14 August 1991"/);
     assert.match(JSON.stringify(debugEvents), /"verified":true/);
     assert.equal(result.text, '[neutral] Verification complete ho gaya.');
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalApiKey;
+    process.env.OPENAI_AGENT_MODEL = originalModel;
+  }
+});
+
+test('streamStableAgentText continues from successful DOB verification to FD summary', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalModel = process.env.OPENAI_AGENT_MODEL;
+  const originalDisableAiDob = process.env.STABLE_DISABLE_AI_DOB;
+
+  const verifyStream = new TextEncoder().encode(
+    [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"status":"in_progress"},"sequence_number":0}',
+      '',
+      'event: response.output_item.added',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_verify","name":"verify_read_access","arguments":""},"output_index":0,"sequence_number":1}',
+      '',
+      'event: response.output_item.done',
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_verify","name":"verify_read_access","arguments":"{\\"mobile_last_4\\":\\"3210\\",\\"date_of_birth\\":\\"1991-08-14\\"}"},"output_index":0,"sequence_number":2}',
+      '',
+      'event: response.incomplete',
+      'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}},"sequence_number":3}',
+      '',
+    ].join('\n'),
+  );
+  const fdStream = new TextEncoder().encode(
+    [
+      'event: response.output_item.added',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_fd","name":"get_fd_summary","arguments":""},"output_index":0,"sequence_number":0}',
+      '',
+      'event: response.output_item.done',
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_fd","name":"get_fd_summary","arguments":"{}"},"output_index":0,"sequence_number":1}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed"},"sequence_number":2}',
+      '',
+    ].join('\n'),
+  );
+  const requestBodies: unknown[] = [];
+
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    const body = requestBodies.at(-1) as { stream?: boolean };
+    assert.equal(body.stream, true);
+    const encoded = requestBodies.length === 1 ? verifyStream : fdStream;
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoded);
+          controller.close();
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
+  process.env.STABLE_DISABLE_AI_DOB = '1';
+
+  try {
+    const chunks: string[] = [];
+    const result = await streamStableAgentText(
+      {
+        persona,
+        transcript: '14 August 1991',
+        history: [
+          { role: 'user', text: 'Meri FD summary batao' },
+          { role: 'model', text: '[neutral] Account details check karne ke liye mobile number ke last four digits batayein.' },
+          { role: 'user', text: '3210' },
+          { role: 'model', text: '[neutral] Mobile last four match ho gaya. Apni date of birth batayein.' },
+        ],
+        route: testRoute('fd.summary'),
+      },
+      (delta) => chunks.push(delta),
+    );
+
+    assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_fd_summary']);
+    assert.equal(result.verified, true);
+    assert.match(result.text, /^\[neutral\] FD-/);
+    assert.match(result.text, / ki FD /);
+    assert.deepEqual(chunks, [result.text]);
+    assert.equal(requestBodies.length, 2);
+    assert.deepEqual((requestBodies[1] as { tools?: Array<{ name: string }> }).tools?.map((tool) => tool.name), ['get_fd_summary']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalApiKey;
+    process.env.OPENAI_AGENT_MODEL = originalModel;
+    process.env.STABLE_DISABLE_AI_DOB = originalDisableAiDob;
+  }
+});
+
+test('streamStableAgentText executes streamed verification tool even when call id is missing', async () => {
+  const persona = getPersonaById('cust_demo_005');
+  assert.ok(persona);
+
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalModel = process.env.OPENAI_AGENT_MODEL;
+
+  const verifyStream = new TextEncoder().encode(
+    [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"status":"in_progress"},"sequence_number":0}',
+      '',
+      'event: response.output_item.added',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"verify_read_access","arguments":""},"output_index":0,"sequence_number":1}',
+      '',
+      'event: response.output_item.done',
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"verify_read_access","arguments":"{\\"mobile_last_4\\":\\"8820\\"}"},"output_index":0,"sequence_number":2}',
+      '',
+      'event: response.incomplete',
+      'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}},"sequence_number":3}',
+      '',
+    ].join('\n'),
+  );
+  const requestBodies: unknown[] = [];
+
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    requestBodies.push(body);
+    if (body.stream) {
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(verifyStream);
+            controller.close();
+          },
+        }),
+      } as Response;
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ output: [] }),
+    } as Response;
+  }) as typeof fetch;
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
+
+  try {
+    const chunks: string[] = [];
+    const result = await streamStableAgentText(
+      {
+        persona,
+        transcript: '8820',
+        history: [
+          { role: 'user', text: 'KYC status batao' },
+          { role: 'model', text: '[neutral] Pehle registered mobile ke last chaar ank batayein.' },
+        ],
+        route: testRoute('kyc.status'),
+      },
+      (delta) => chunks.push(delta),
+    );
+
+    assert.equal(result.text, '[neutral] Mobile last four match ho gaya. Apni date of birth batayein.');
+    assert.deepEqual(result.toolCalls, ['verify_read_access']);
+    assert.equal(result.verified, false);
+    assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. Apni date of birth batayein.']);
+    assert.equal(requestBodies.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;

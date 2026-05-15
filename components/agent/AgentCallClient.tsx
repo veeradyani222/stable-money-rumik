@@ -123,11 +123,26 @@ function BackIcon() {
   );
 }
 
-function PhoneOffIcon() {
+function ChevronLeftIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="m16 2 6 6-3 3c-.5.5-1.2.6-1.8.3l-2.1-1a13.5 13.5 0 0 1-4.8 4.8l1 2.1c.3.6.2 1.3-.3 1.8l-3 3-6-6 2.5-2.5c.7-.7 1.7-.9 2.6-.5l1.1.5a10 10 0 0 0 3.3-3.3L11 9.1c-.4-.9-.2-1.9.5-2.6L16 2Z" />
-      <path d="M2 2 22 22" />
+      <path d="M15 18 9 12l6-6" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M9 18l6-6-6-6" />
+    </svg>
+  );
+}
+
+function PhoneOffIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={{ transform: 'rotate(135deg)' }}>
+      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 10.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
     </svg>
   );
 }
@@ -201,6 +216,8 @@ function getRealtimeTranscript(event: OpenAIRealtimeTranscriptEvent): string {
 }
 
 function isInterruptibleTranscript(utterance: string): boolean {
+  const digits = utterance.replace(/\D/g, '');
+  if (/^\d{4}$/.test(digits)) return true;
   const words = utterance.trim().split(/\s+/).filter(Boolean);
   return words.length >= 3;
 }
@@ -597,6 +614,7 @@ export function AgentCallClient() {
   const [userVoiceVisual, setUserVoiceVisual] = useState(false);
   const [voiceAnalyser, setVoiceAnalyser] = useState<AnalyserNode | null>(null);
   const [agentSidebarWidthPx, setAgentSidebarWidthPx] = useState(AGENT_SIDEBAR_WIDTH_DEFAULT);
+  const [isPersonaPanelOpen, setIsPersonaPanelOpen] = useState(false);
   const agentSidebarResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -2018,7 +2036,7 @@ export function AgentCallClient() {
 
   return (
     <main
-      className="agent-page"
+      className={isPersonaPanelOpen ? 'agent-page agent-page--panel-open' : 'agent-page'}
       style={{ ['--agent-sidebar-width' as string]: `${agentSidebarWidthPx}px` } as React.CSSProperties}
     >
       <section className="voice-stage" aria-label="Voice call">
@@ -2095,6 +2113,24 @@ export function AgentCallClient() {
           </div>
         </div>
       </section>
+
+      <button
+        type="button"
+        className="mobile-panel-handle"
+        aria-controls="agent-persona-panel"
+        aria-expanded={isPersonaPanelOpen}
+        aria-label="Show persona panel"
+        onClick={() => setIsPersonaPanelOpen(true)}
+      >
+        <ChevronLeftIcon />
+      </button>
+
+      <button
+        type="button"
+        className="mobile-panel-backdrop"
+        aria-label="Hide persona panel"
+        onClick={() => setIsPersonaPanelOpen(false)}
+      />
 
       <aside className="persona-panel" id="agent-persona-panel" aria-label="Persona context">
         <div

@@ -136,6 +136,18 @@ test('agent call client does not add internal connection status to the visible t
   assert.doesNotMatch(clientSource, /appendTranscript\('system', `Connected as/);
 });
 
+test('agent call client exposes an accessible mobile persona drawer handle and outside-close backdrop', () => {
+  assert.match(clientSource, /const \[isPersonaPanelOpen, setIsPersonaPanelOpen\] = useState\(false\);/);
+  assert.match(clientSource, /className="mobile-panel-handle"/);
+  assert.match(clientSource, /className="mobile-panel-backdrop"/);
+  assert.match(clientSource, /aria-controls="agent-persona-panel"/);
+  assert.match(clientSource, /aria-expanded=\{isPersonaPanelOpen\}/);
+  assert.match(clientSource, /setIsPersonaPanelOpen\(true\)/);
+  assert.match(clientSource, /setIsPersonaPanelOpen\(false\)/);
+  assert.doesNotMatch(clientSource, /className="mobile-panel-toggle"/);
+  assert.doesNotMatch(clientSource, /className="mobile-panel-close"/);
+});
+
 test('agent call client starts a fresh microphone recorder after confirmed speech', () => {
   const speechStartIndex = clientSource.indexOf("logVoiceDebug('vad:speech-start'");
   const recorderStartIndex = clientSource.indexOf('utteranceRecorder.start(240)', speechStartIndex - 500);
@@ -236,6 +248,17 @@ test('agent call client only treats completed transcript words as interruptions'
   assert.notEqual(askIndex, -1);
   assert.ok(transcriptIndex < askIndex);
   assert.match(clientSource, /isInterruptibleTranscript\(utterance\)/);
+});
+
+test('agent call client accepts bare four digit verification transcripts', () => {
+  const gateIndex = clientSource.indexOf('function isInterruptibleTranscript');
+  const askIndex = clientSource.indexOf('void askAgent(utterance);', gateIndex);
+
+  assert.notEqual(gateIndex, -1);
+  assert.notEqual(askIndex, -1);
+  assert.match(clientSource.slice(gateIndex, askIndex), /replace\(\/\\D\/g, ''\)/);
+  assert.match(clientSource.slice(gateIndex, askIndex), /(?:\^|\\b)\\d\{4\}(?:\$|\\b)/);
+  assert.match(clientSource.slice(gateIndex, askIndex), /return true;/);
 });
 
 test('agent call client stops stale assistant audio immediately on server VAD speech start', () => {
