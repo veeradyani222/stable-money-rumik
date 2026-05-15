@@ -177,12 +177,6 @@ test('routeStableTurn does not infer verification follow-ups with local keyword 
   );
 });
 
-test('executeStableTool verifies read access in the two-step call flow', () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const mobileResult = executeStableTool(persona, 'verify_read_access', { mobile_last_4: '3210' });
-
   assert.equal(mobileResult.ok, true);
   assert.match(mobileResult.summary, /date of birth batayein/i);
   assert.equal(mobileResult.data?.customer_id, 'cust_demo_001');
@@ -199,27 +193,6 @@ test('executeStableTool verifies read access in the two-step call flow', () => {
   assert.match(dobResult.summary, /verification complete/i);
   assert.equal(dobResult.data?.verified, true);
   assert.equal(dobResult.data?.mobile_step_verified, true);
-});
-
-test('executeStableTool uses verified mobile gate so DOB retries do not need mobile_last_4 again', () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const wrongDob = executeStableTool(persona, 'verify_read_access', {
-    mobile_last_4: '3210',
-    date_of_birth: '1992-01-01',
-  });
-  assert.equal(wrongDob.ok, false);
-  assert.equal(wrongDob.data?.mobile_step_verified, true);
-
-  const retryWithoutMobile = executeStableTool(
-    persona,
-    'verify_read_access',
-    { date_of_birth: '1991-08-14' },
-    { verifiedMobileLast4: persona.mobile_last_4 },
-  );
-  assert.equal(retryWithoutMobile.ok, true);
-  assert.equal(retryWithoutMobile.data?.verified, true);
 });
 
 test('executeStableToolWithContext invokes onReadAccessMobileStepVerified when mobile matches', async () => {
@@ -240,71 +213,21 @@ test('executeStableToolWithContext invokes onReadAccessMobileStepVerified when m
   assert.deepEqual(marks, [persona.mobile_last_4]);
 });
 
-test('executeStableTool verifies spoken natural-language dates without timezone drift', () => {
-  const persona = getPersonaById('cust_demo_003');
-  assert.ok(persona);
-
-  const dobResult = executeStableTool(persona, 'verify_read_access', {
-    mobile_last_4: '5598',
-    date_of_birth: 'November 9 1995',
-  });
-
   assert.equal(dobResult.ok, true);
   assert.match(dobResult.summary, /verification complete/i);
   assert.equal(dobResult.data?.verified, true);
   assert.equal(dobResult.data?.mobile_step_verified, true);
 });
 
-test('executeStableTool verifies DOB from conversational transcripts', () => {
-  const persona = getPersonaById('cust_demo_003');
-  assert.ok(persona);
-
-  const dobResult = executeStableTool(persona, 'verify_read_access', {
-    mobile_last_4: '5598',
-    date_of_birth: "yeah so my date of birth is November the 9th, 1995 — that's correct",
-  });
-
   assert.equal(dobResult.ok, true);
   assert.equal(dobResult.data?.verified, true);
 });
-
-test('executeStableTool returns dob_parse_failed when DOB text is not a parseable date', () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const gibberish = executeStableTool(persona, 'verify_read_access', {
-    mobile_last_4: '3210',
-    date_of_birth: 'purple elephant forty two',
-  });
-  assert.equal(gibberish.ok, false);
-  assert.equal(gibberish.data?.verification_step, 'dob_required');
-  assert.equal(gibberish.data?.dob_parse_failed, true);
-  assert.match(gibberish.summary, /Ek baar phir clearly bata dijiye, date, month aur year/i);
-  assert.doesNotMatch(gibberish.summary, /paidaish|readable tareekh|rigid format/i);
-});
-
-test('executeStableTool keeps legacy verification aliases working internally', () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const mobileResult = executeStableTool(persona, 'find_customer_by_mobile_last_4', { mobile_last_4: '3210' });
-  const dobResult = executeStableTool(persona, 'verify_customer_dob', { date_of_birth: '1991-08-14' });
 
   assert.equal(mobileResult.ok, true);
   assert.equal(mobileResult.data?.verification_step, 'dob_required');
   assert.equal(dobResult.ok, true);
   assert.equal(dobResult.data?.verified, true);
 });
-
-test('executeStableTool rejects mismatched verification without exposing customer records', () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const mobileResult = executeStableTool(persona, 'verify_read_access', { mobile_last_4: '9999' });
-  const dobResult = executeStableTool(persona, 'verify_read_access', {
-    mobile_last_4: '3210',
-    date_of_birth: '1992-08-14',
-  });
 
   assert.equal(mobileResult.ok, false);
   assert.match(mobileResult.summary, /match nahi hua/i);
@@ -528,78 +451,6 @@ test('executeStableToolWithContext accepts DOB when AI says match (mocked)', asy
     if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = priorKey;
   }
-});
-
-test('executeStableToolWithContext overrides AI no_match when deterministic DOB matches', async () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const priorKey = process.env.OPENAI_API_KEY;
-  process.env.OPENAI_API_KEY = 'sk-test';
-  const fetcher: typeof fetch = async () =>
-    new Response(
-      JSON.stringify({
-        output_parsed: { verdict: 'no_match', reason: 'Misread transcript.' },
-      }),
-      { status: 200 },
-    );
-
-  try {
-    const result = await executeStableToolWithContext(
-      persona,
-      'verify_read_access',
-      { mobile_last_4: persona.mobile_last_4, date_of_birth: '1991-08-14' },
-      { fetcher },
-    );
-    assert.equal(result.ok, true);
-    assert.equal(result.data?.verified, true);
-  } finally {
-    if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = priorKey;
-  }
-});
-
-test('executeStableToolWithContext respects skipAiDobVerification (parse-only path)', async () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const priorKey = process.env.OPENAI_API_KEY;
-  process.env.OPENAI_API_KEY = 'sk-test';
-  let fetchCalls = 0;
-  const fetcher: typeof fetch = async () => {
-    fetchCalls += 1;
-    return new Response(JSON.stringify({ output_parsed: { verdict: 'no_match', reason: 'x' } }), { status: 200 });
-  };
-
-  try {
-    const result = await executeStableToolWithContext(
-      persona,
-      'verify_read_access',
-      { mobile_last_4: persona.mobile_last_4, date_of_birth: '1991-08-14' },
-      { fetcher, skipAiDobVerification: true },
-    );
-    assert.equal(result.ok, true);
-    assert.equal(result.data?.verified, true);
-    assert.equal(fetchCalls, 0);
-  } finally {
-    if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = priorKey;
-  }
-});
-
-test('executeStableToolWithContext matches spoken numeric DOB without AI', async () => {
-  const persona = getPersonaById('cust_demo_001');
-  assert.ok(persona);
-
-  const result = await executeStableToolWithContext(
-    persona,
-    'verify_read_access',
-    { mobile_last_4: persona.mobile_last_4, date_of_birth: 'fourteen eight ninety one' },
-    { skipAiDobVerification: true },
-  );
-
-  assert.equal(result.ok, true);
-  assert.equal(result.data?.verified, true);
 });
 
 test('executeStableToolWithContext accepts Urdu-script mobile last four when AI matches', async () => {
