@@ -43,7 +43,7 @@ This is a **demo assignment** — no real banking APIs, no production PII handli
 
 ## Architecture
 
-High-level system view: browser UI, Next.js API routes, Postgres, and external AI/voice/email services.
+High-level system view: browser UI, Next.js API routes, Postgres, and external AI/voice/email services. The OpenAI Realtime STT connection is opened directly from the browser as a WebSocket — it is not proxied through the Next.js server.
 
 ```mermaid
 flowchart TB
@@ -78,7 +78,7 @@ flowchart TB
   ONB --> API_ONB
   AGT --> API_AGT
   AGT --> API_VOICE
-  AGT --> OAI_STT
+  AGT -->|"direct WebSocket (not proxied)"| OAI_STT
   API_AGT --> OAI_LLM
   API_VOICE --> RUMIK
   LIB --> PG
