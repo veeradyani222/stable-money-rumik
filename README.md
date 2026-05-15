@@ -1,4 +1,4 @@
-# Stable Money — Voice Agent Demo
+﻿# Stable Money — Voice Agent Demo
 
 A full-stack demo of **Stable Assist**, a Hindi-English voice support agent for Stable Money customers. Users pick a demo persona, start a live call, and speak naturally about KYC, payments, fixed deposits, refunds, and support tickets. The agent answers with policy-grounded tools, tiered verification, and streamed speech.
 
@@ -15,6 +15,7 @@ Built with **Next.js 15**, **React 19**, **PostgreSQL**, **OpenAI** (reasoning +
 - [Agent brain](#agent-brain)
 - [Authentication tiers](#authentication-tiers)
 - [Demo personas](#demo-personas)
+- [Known limitations](#known-limitations)
 - [Project structure](#project-structure)
 - [API reference](#api-reference)
 - [Environment variables](#environment-variables)
@@ -164,7 +165,7 @@ flowchart LR
 
 ## Agent brain
 
-### Intent 뿯↽ policy 뿯↽ tools
+### Intent → policy → tools
 
 1. **Classify** the user turn (lib/agent/intent-classifier.ts) into a StableIntentId (e.g. payment.failed, kyc.status, fd.withdraw.premature).
 2. **Resolve route** (lib/agent/stable-policy.ts): auth tier + allowed tool names.
@@ -232,6 +233,24 @@ Selecting a persona overwrites the matching row in demo_users with that seed sna
 
 ---
 
+## Known limitations
+
+This project is intentionally scoped as a demo. Three areas I want to call out explicitly before anyone considers running this at scale:
+
+### No rate limiting on expensive endpoints
+
+I have not added rate limiting to `/api/voice/deepgram-token`, `/api/voice/openai-transcribe`, `/api/voice/rumik-session`, `/api/agent/respond-stream`, or the OpenAI Realtime token endpoint. Any of these can burn provider quota quickly under load. The transcription endpoint also accepts uploaded audio without file-size validation. Before a production deployment I would add per-IP and per-session rate limits (via Redis / Upstash / Vercel KV), enforce upload size caps on audio, and require session validation on every token-minting endpoint.
+
+### Session security is demo-grade
+
+I pass `session_id` in plain URLs and request bodies in several places (e.g. onboarding redirects and secure link generation). The httpOnly and sameSite cookie flags are set correctly, but I have not set the `secure` flag, and the raw session identifier is exposed in links that a user could share. For a real deployment I would replace bare session IDs in URLs with signed, scoped, short-lived tokens, enforce the `secure` cookie flag, and scope each token to the specific action it authorises.
+
+### Agent turns can get very expensive
+
+A single user turn can chain intent classification, a streaming OpenAI response, multiple tool calls, recovery calls, STT, and TTS — all in sequence. The agent loop is currently configured with an 8 k output-token ceiling and up to 24 model rounds per turn. Without per-turn budgets, provider timeouts, and circuit breakers, a handful of simultaneous users asking complex questions can exhaust OpenAI quota or cause long tail latencies. I would reduce the maximum loop count significantly, add `AbortController` timeouts on every provider call, and enforce a hard elapsed-time cap per turn before treating this as production-ready.
+
+---
+
 ## Project structure
 
 ```
@@ -289,6 +308,8 @@ Protected routes accept session_id in the body and validate it against the httpO
 
 Copy .env.example to .env.local and fill in values.
 
+> **Note:** All values in .env.example are fake placeholders. Do not commit real credentials.
+
 ### Required
 
 | Variable | Purpose |
@@ -303,7 +324,7 @@ Copy .env.example to .env.local and fill in values.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | RUMIK_TTS_MODEL | muga | Rumik voice model |
-| OPENAI_AGENT_MODEL | gpt-5-mini | Main agent model |
+| OPENAI_AGENT_MODEL | gpt-4o-mini | Main agent model |
 | OPENAI_INTENT_MODEL | falls back to agent model | Intent classifier |
 | OPENAI_STT_MODEL | gpt-4o-mini-transcribe | Batch STT |
 | OPENAI_REALTIME_TRANSCRIBE_MODEL | STT model | Realtime transcription |
@@ -343,7 +364,7 @@ npm run migrate
 npm run dev
 ```
 
-Open http://localhost:3000 뿯↽ onboarding 뿯↽ pick a persona 뿯↽ start the agent call.
+Open http://localhost:3000 → onboarding → pick a persona → start the agent call.
 
 **Microphone** access is required. Use HTTPS or localhost so the browser allows getUserMedia.
 
