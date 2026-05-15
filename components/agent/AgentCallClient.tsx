@@ -415,12 +415,7 @@ function prefetchOpeningAudio(): Promise<void> {
         socket.binaryType = 'arraybuffer';
 
         socket.onopen = () => {
-          const packet = { text: normalizeRumikText(STABLE_DEFAULT_OPENING).slice(0, 2000), speaker_id: 0 };
-          logVoiceDebug('rumik:opening-cache:send-text', {
-            textChars: packet.text.length,
-            speaker_id: packet.speaker_id,
-          });
-          socket?.send(JSON.stringify(packet));
+          logVoiceDebug('rumik:opening-cache:socket-open');
         };
 
         socket.onmessage = (event) => {
@@ -545,7 +540,7 @@ function prefetchAudioCache(input: { cache: OpeningAudioCache; text: string; lab
         socket.binaryType = 'arraybuffer';
 
         socket.onopen = () => {
-          socket?.send(JSON.stringify({ text: normalizeRumikText(input.text).slice(0, 2000), speaker_id: 0 }));
+          logVoiceDebug(`rumik:${input.label}-cache:socket-open`);
         };
 
         socket.onmessage = (event) => {
@@ -1644,7 +1639,7 @@ export function AgentCallClient() {
               await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
               return;
             }
-            await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
+            await playRumikText(chunk, { resetPlayback: true, waitForCompletion: false, timingLabel: 'answer' });
           });
         };
 

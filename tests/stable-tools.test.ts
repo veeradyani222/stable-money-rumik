@@ -587,6 +587,21 @@ test('executeStableToolWithContext respects skipAiDobVerification (parse-only pa
   }
 });
 
+test('executeStableToolWithContext matches spoken numeric DOB without AI', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const result = await executeStableToolWithContext(
+    persona,
+    'verify_read_access',
+    { mobile_last_4: persona.mobile_last_4, date_of_birth: 'fourteen eight ninety one' },
+    { skipAiDobVerification: true },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.verified, true);
+});
+
 test('executeStableToolWithContext accepts Urdu-script mobile last four when AI matches', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);

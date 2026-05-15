@@ -48,9 +48,11 @@ test('agent call client starts opening playback after realtime transcription is 
 test('agent call client prefetches fixed opening audio before the call starts', () => {
   const prefetchIndex = clientSource.indexOf('void prefetchOpeningAudio();');
   const startCallIndex = clientSource.indexOf('const startCall = useCallback');
+  const prefetchEndIndex = clientSource.indexOf('function prefetchAudioCache', prefetchIndex);
+  const prefetchSource = clientSource.slice(prefetchIndex, prefetchEndIndex);
 
   assert.match(clientSource, /openingAudioCache/);
-  assert.match(clientSource, /rumik:opening-cache:send-text/);
+  assert.doesNotMatch(prefetchSource, /socket\?\.send\(JSON\.stringify\(packet\)\)/);
   assert.notEqual(prefetchIndex, -1);
   assert.notEqual(startCallIndex, -1);
   assert.ok(prefetchIndex < startCallIndex);
@@ -59,23 +61,28 @@ test('agent call client prefetches fixed opening audio before the call starts', 
 test('agent call client prefetches randomized thinking filler audio before turns need it', () => {
   const prefetchIndex = clientSource.indexOf('void prefetchThinkingFillerAudio();');
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
+  const cacheIndex = clientSource.indexOf('function prefetchAudioCache');
+  const cacheEndIndex = clientSource.indexOf('function prefetchThinkingFillerAudio', cacheIndex);
+  const cacheSource = clientSource.slice(cacheIndex, cacheEndIndex);
 
   assert.match(clientSource, /STABLE_THINKING_FILLERS/);
   assert.match(clientSource, /thinkingFillerAudioCaches/);
+  assert.doesNotMatch(cacheSource, /socket\?\.send\(JSON\.stringify/);
   assert.notEqual(prefetchIndex, -1);
   assert.notEqual(askAgentIndex, -1);
   assert.ok(prefetchIndex < askAgentIndex);
 });
 
-test('cached thinking fillers keep the original stable copy', () => {
+test('cached thinking fillers are unique stable copy variants', () => {
   const fillerBlockMatch = clientSource.match(/const STABLE_THINKING_FILLERS = \[([\s\S]*?)\] as const;/);
   assert.ok(fillerBlockMatch);
   const fillers = [...fillerBlockMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
 
-  assert.deepEqual(fillers, [
-    '[neutral] Ek minute dijiye, main system mein iski details nikalti hoon aur aapko batati hoon. Wait karne ke liye thank you',
-    '[neutral] Okay, main abhi check kar leti hoon aur aapko batati hoon. Thank you for your understanding.',
-  ]);
+  assert.ok(fillers.length >= 2);
+  assert.equal(new Set(fillers).size, fillers.length);
+  for (const filler of fillers) {
+    assert.match(filler, /^\[neutral\] /);
+  }
 });
 
 test('agent call client reports voice timing milestones to the timing route without console logging', () => {

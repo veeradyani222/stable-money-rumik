@@ -1,6 +1,6 @@
 /**
  * Semantic date-of-birth check: compares caller utterance (ASR / chat text)
- * to the canonical YYYY-MM-DD on file. Falls back to deterministic parsing when unclear.
+ * to the canonical YYYY-MM-DD on file. The AI verdict is final for this check.
  */
 
 type Fetcher = typeof fetch;
@@ -94,7 +94,8 @@ function parseVerdict(text: string): DobAiVerdict | null {
 
 /**
  * Ask the model whether the caller stated the same calendar day as recordIsoDate.
- * Returns unclear on any failure so callers can fall back to deterministic parsing.
+ * Returns unclear when the model cannot infer a clear date. Callers should treat
+ * unclear as a hard verification failure, not a deterministic fallback.
  */
 export async function matchCallerDobWithPersonaAi(input: DobAiMatchInput): Promise<DobAiMatchResult> {
   const utterance = input.callerUtterance.trim();
@@ -119,6 +120,7 @@ export async function matchCallerDobWithPersonaAi(input: DobAiMatchInput): Promi
       'Examples that should resolve when they match the record: "Year 1993, 29th of the month July." → 1993-07-29; "uneenees sau ninety three, July ki 29 tareekh" → 1993-07-29; "29-07-1993", "29/07/93", "twenty ninth July nineteen ninety three", "July twenty nine ninety three" → 1993-07-29.',
       'verdict=match when the caller clearly conveys that exact calendar day in any ordering or phrasing.',
       'verdict=no_match when the caller clearly conveys a different specific calendar day.',
+      'You are the sole verifier. Do not hedge. Always return match or no_match if any date is inferable.',
       'verdict=unclear only when no calendar date can be reasonably inferred, when there are multiple conflicting dates in the same utterance, or when the utterance is clearly not a date at all (e.g. only an age, only a zodiac, gibberish).',
       'Do not match based on age alone, zodiac alone, or partial guesses (e.g. only a year).',
       'Ignore politeness fillers; focus on the date content.',

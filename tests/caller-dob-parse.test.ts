@@ -30,6 +30,23 @@ test('parseCallerDobToIsoDate accepts many formats for the same calendar day', (
   }
 });
 
+test('parseCallerDobToIsoDate handles spoken numeric DOB transcripts', () => {
+  const expected = '1991-08-14';
+  const spoken = [
+    'fourteen eight ninety one',
+    'fourteen eight nineteen ninety one',
+    'fourteenth august nineteen ninety one',
+    'August fourteenth nineteen ninety one',
+    'my date of birth is fourteen eight ninety one',
+  ];
+
+  for (const input of spoken) {
+    const r = parseCallerDobToIsoDate(input);
+    assert.equal(r.ok, true, `input: ${JSON.stringify(input)}`);
+    if (r.ok) assert.equal(r.isoDate, expected, `input: ${JSON.stringify(input)}`);
+  }
+});
+
 test('parseCallerDobToIsoDate matches persona-style ISO for August 1991', () => {
   const expected = '1991-08-14';
   const variants = ['1991-08-14', '14/8/1991', '14-08-1991', '14 August 1991', 'August 14, 1991', '14th August 1991'];

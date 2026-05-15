@@ -512,15 +512,15 @@ async function verifyReadAccessWithAi(
       fetcher: context.fetcher,
     });
 
-    if (ai.verdict === 'match') return completeDobVerification(persona);
-
-    if (ai.verdict === 'no_match') {
-      const parsedFallback = parseCallerDobToIsoDate(raw);
-      if (parsedFallback.ok && parsedFallback.isoDate === persona.date_of_birth) {
-        return completeDobVerification(persona);
-      }
-      return dobMismatchResult();
+    if (!ai.modelAnswered) {
+      throw new Error('DOB verification unavailable — AI model did not respond');
     }
+
+    if (ai.verdict === 'match') {
+      return completeDobVerification(persona);
+    }
+
+    return dobMismatchResult();
   }
 
   return verifyDobAgainstPersonaDeterministic(persona, raw);
