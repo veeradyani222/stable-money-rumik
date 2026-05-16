@@ -513,7 +513,24 @@ test('agent call client only treats completed transcript words as interruptions'
   assert.notEqual(transcriptIndex, -1);
   assert.notEqual(askIndex, -1);
   assert.ok(transcriptIndex < askIndex);
-  assert.match(clientSource, /isInterruptibleTranscript\(utterance\)/);
+  assert.match(clientSource, /isInterruptibleTranscript\(input\.utterance\)/);
+});
+
+test('agent call client accepts short realtime replies after assistant playback finishes', () => {
+  const helperIndex = clientSource.indexOf('function shouldAcceptRealtimeTranscript');
+  const connectedBranchIndex = clientSource.indexOf("input.callState === 'connected'", helperIndex);
+  const lengthGateIndex = clientSource.indexOf('return input.utterance.length >= 2;', connectedBranchIndex);
+  const realtimeMessageIndex = clientSource.indexOf("dataChannel.addEventListener('message'");
+  const acceptGateIndex = clientSource.indexOf('shouldAcceptRealtimeTranscript({', realtimeMessageIndex);
+  const askIndex = clientSource.indexOf('void askAgent(utterance);', acceptGateIndex);
+
+  assert.notEqual(helperIndex, -1);
+  assert.notEqual(connectedBranchIndex, -1);
+  assert.notEqual(lengthGateIndex, -1);
+  assert.notEqual(acceptGateIndex, -1);
+  assert.notEqual(askIndex, -1);
+  assert.ok(helperIndex < realtimeMessageIndex);
+  assert.ok(acceptGateIndex < askIndex);
 });
 
 test('agent call client accepts bare four digit verification transcripts', () => {
@@ -562,6 +579,25 @@ test('agent call client enables realtime mic after attaching the stream', () => 
   assert.notEqual(addTrackIndex, -1);
   assert.notEqual(syncIndex, -1);
   assert.ok(addTrackIndex < syncIndex);
+});
+
+test('agent call client re-arms realtime transcription when the channel drops', () => {
+  const reconnectRefIndex = clientSource.indexOf('const realtimeReconnectTimerRef = useRef<number | null>(null);');
+  const connectIndex = clientSource.indexOf('const connectOpenAIRealtimeTranscription = useCallback');
+  const scheduleIndex = clientSource.indexOf('const scheduleRealtimeReconnect', connectIndex);
+  const channelCloseIndex = clientSource.indexOf("dataChannel.addEventListener('close'", connectIndex);
+  const channelErrorIndex = clientSource.indexOf("dataChannel.addEventListener('error'", connectIndex);
+  const peerStateIndex = clientSource.indexOf("peer.addEventListener('connectionstatechange'", connectIndex);
+  const reconnectCallIndex = clientSource.indexOf('void connectOpenAIRealtimeTranscription(stream)', scheduleIndex);
+
+  assert.notEqual(reconnectRefIndex, -1);
+  assert.notEqual(scheduleIndex, -1);
+  assert.notEqual(channelCloseIndex, -1);
+  assert.notEqual(channelErrorIndex, -1);
+  assert.notEqual(peerStateIndex, -1);
+  assert.notEqual(reconnectCallIndex, -1);
+  assert.ok(scheduleIndex < channelCloseIndex);
+  assert.ok(scheduleIndex < reconnectCallIndex);
 });
 
 test('agent call client aborts stale streamed agent responses on interruption', () => {

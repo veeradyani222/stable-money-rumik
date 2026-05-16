@@ -276,6 +276,22 @@ function isInterruptibleTranscript(utterance: string): boolean {
   return words.length >= 3;
 }
 
+function shouldAcceptRealtimeTranscript(input: {
+  utterance: string;
+  responding: boolean;
+  callState: CallState;
+}): boolean {
+  if (input.responding || input.callState === 'thinking' || input.callState === 'speaking') {
+    return isInterruptibleTranscript(input.utterance);
+  }
+
+  if (input.callState === 'connected') {
+    return input.utterance.length >= 2;
+  }
+
+  return false;
+}
+
 function normalizeRealtimeEchoText(text: string): string {
   return text
     .replace(/\[[^\]]+\]/g, ' ')
@@ -745,6 +761,7 @@ export function AgentCallClient() {
   const rumikStreamDoneRef = useRef(false);
   const realtimePeerRef = useRef<RTCPeerConnection | null>(null);
   const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
+  const realtimeReconnectTimerRef = useRef<number | null>(null);
   const rumikSpeakingRef = useRef(false);
   const rumikPlaybackIdRef = useRef(0);
   const staticOpeningAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -1721,6 +1738,10 @@ export function AgentCallClient() {
     callAbortRef.current = null;
     setPlayOutboundTone(false);
     setUserVoiceVisual(false);
+    if (realtimeReconnectTimerRef.current) {
+      window.clearTimeout(realtimeReconnectTimerRef.current);
+      realtimeReconnectTimerRef.current = null;
+    }
     realtimeDataChannelRef.current?.close();
     realtimeDataChannelRef.current = null;
     realtimePeerRef.current?.close();
@@ -2021,8 +2042,41 @@ export function AgentCallClient() {
 
       const dataChannel = peer.createDataChannel('oai-events');
       realtimeDataChannelRef.current = dataChannel;
+      const scheduleRealtimeReconnect = (reason: string) => {
+        if (realtimeReconnectTimerRef.current) return;
+        if (micStreamRef.current !== stream || isInactiveCallState(callStateRef.current)) return;
+        logVoiceDebug('realtime:reconnect:scheduled', { reason });
+        realtimeReconnectTimerRef.current = window.setTimeout(() => {
+          realtimeReconnectTimerRef.current = null;
+          if (micStreamRef.current !== stream || isInactiveCallState(callStateRef.current)) return;
+
+          const staleDataChannel = realtimeDataChannelRef.current;
+          const stalePeer = realtimePeerRef.current;
+          realtimeDataChannelRef.current = null;
+          realtimePeerRef.current = null;
+          staleDataChannel?.close();
+          stalePeer?.close();
+          void connectOpenAIRealtimeTranscription(stream).catch((reconnectError) => {
+            logVoiceDebug('realtime:reconnect:error', {
+              reason,
+              message: reconnectError instanceof Error ? reconnectError.message : 'Realtime reconnect failed',
+            });
+          });
+        }, 500);
+      };
+
       dataChannel.addEventListener('open', () => {
         logVoiceDebug('realtime:data-channel:open', { expires_at: tokenData.expires_at });
+      });
+      dataChannel.addEventListener('close', () => {
+        if (realtimeDataChannelRef.current !== dataChannel) return;
+        logVoiceDebug('realtime:data-channel:close', { readyState: dataChannel.readyState });
+        scheduleRealtimeReconnect('data-channel-close');
+      });
+      dataChannel.addEventListener('error', () => {
+        if (realtimeDataChannelRef.current !== dataChannel) return;
+        logVoiceDebug('realtime:data-channel:error', { readyState: dataChannel.readyState });
+        scheduleRealtimeReconnect('data-channel-error');
       });
       dataChannel.addEventListener('message', (event) => {
         try {
@@ -2063,7 +2117,15 @@ export function AgentCallClient() {
           setUserVoiceVisual(false);
           setInterimText('');
           if (utterance.length >= 2) {
-            if (!isInterruptibleTranscript(utterance)) return;
+            if (
+              !shouldAcceptRealtimeTranscript({
+                utterance,
+                responding: respondingRef.current,
+                callState: callStateRef.current,
+              })
+            ) {
+              return;
+            }
             if (staticOpeningAudioRef.current && isLikelyStaticOpeningEcho(utterance)) {
               logVoiceDebug('realtime:transcript:static-opening-echo', {
                 transcriptChars: utterance.length,
@@ -2106,6 +2168,20 @@ export function AgentCallClient() {
       await peer.setRemoteDescription({
         type: 'answer',
         sdp: sdpResponseText,
+      });
+      peer.addEventListener('connectionstatechange', () => {
+        if (realtimePeerRef.current !== peer) return;
+        logVoiceDebug('realtime:peer:connection-state', { connectionState: peer.connectionState });
+        if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') {
+          scheduleRealtimeReconnect(`peer-${peer.connectionState}`);
+        }
+      });
+      peer.addEventListener('iceconnectionstatechange', () => {
+        if (realtimePeerRef.current !== peer) return;
+        logVoiceDebug('realtime:peer:ice-connection-state', { iceConnectionState: peer.iceConnectionState });
+        if (peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'disconnected') {
+          scheduleRealtimeReconnect(`ice-${peer.iceConnectionState}`);
+        }
       });
       logVoiceDebug('realtime:peer:connected');
     },
