@@ -155,9 +155,45 @@ function getRumikGuideBlurb(): string {
   return cachedRumikGuideBlurb;
 }
 
-function toolParameters(parameters: Record<string, unknown>): OpenAITool['parameters'] {
+const OPENAI_ARGLESS_TOOL_NAMES = new Set([
+  'verify_read_access',
+  'lookup_customer_profile',
+  'get_fd_booking_status',
+  'get_payment_reconciliation_status',
+  'get_kyc_status',
+  'get_premature_withdrawal_quote',
+  'get_support_ticket_status',
+  'get_payment_summary',
+  'get_fd_summary',
+  'get_refund_status',
+]);
+
+const IGNORE_MODEL_ARGS_TOOL_NAMES = new Set([
+  'lookup_customer_profile',
+  'get_fd_booking_status',
+  'get_payment_reconciliation_status',
+  'get_kyc_status',
+  'get_premature_withdrawal_quote',
+  'get_support_ticket_status',
+  'get_payment_summary',
+  'get_fd_summary',
+  'get_refund_status',
+]);
+
+function toolParameters(toolName: string, parameters: Record<string, unknown>): OpenAITool['parameters'] {
+  if (OPENAI_ARGLESS_TOOL_NAMES.has(toolName)) {
+    return {
+      type: 'object',
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    };
+  }
+
   const properties: Record<string, { type: 'string'; description: string }> = {};
+  const required: string[] = [];
   for (const [key, description] of Object.entries(parameters)) {
+    const optional = typeof description !== 'string' && (description as { optional?: boolean }).optional === true;
     properties[key] = {
       type: 'string',
       description:
@@ -165,12 +201,13 @@ function toolParameters(parameters: Record<string, unknown>): OpenAITool['parame
           ? description
           : String((description as { description?: string }).description ?? ''),
     };
+    if (!optional) required.push(key);
   }
 
   return {
     type: 'object',
     properties,
-    required: Object.keys(properties),
+    required,
     additionalProperties: false,
   };
 }
@@ -199,6 +236,20 @@ function reasoningFieldsForModel(model: string): { reasoning?: { effort: 'low' }
 
 function defaultRoute(): StableIntentRoute {
   return { intent: 'unknown', authTier: 'Tier A', tools: [] };
+}
+
+function transcriptPreview(transcript: string): string {
+  const trimmed = transcript.trim().replace(/\s+/g, ' ');
+  return trimmed.length > 120 ? `${trimmed.slice(0, 120)}...` : trimmed;
+}
+
+function routeLogPayload(route: StableIntentRoute | null | undefined): Record<string, unknown> | null {
+  if (!route) return null;
+  return {
+    intent: route.intent,
+    authTier: route.authTier,
+    tools: route.tools,
+  };
 }
 
 function accountToolsForRoute(route: StableIntentRoute): string[] {
@@ -254,18 +305,50 @@ function inferRouteFromLocalContext(input: BuildOpenAIResponseRequestInput): Sta
 }
 
 async function resolveRouteForAgent(input: BuildOpenAIResponseRequestInput): Promise<StableIntentRoute> {
-  if (input.route) return input.route;
+  console.log('[stable-route:resolve-start]', {
+    transcript_preview: transcriptPreview(input.transcript),
+    transcript_chars: input.transcript.length,
+    history_messages: input.history.length,
+    call_verified: input.callVerified === true,
+    verified_mobile_gate: input.toolContext?.verifiedMobileLast4 ?? null,
+    pending_route: routeLogPayload(input.toolContext?.pendingRoute),
+    provided_route: routeLogPayload(input.route),
+    classify_unknown_intent: input.classifyUnknownIntent === true,
+  });
+
+  if (input.route) {
+    console.log('[stable-route:provided]', {
+      route: routeLogPayload(input.route),
+    });
+    return input.route;
+  }
   if (isSupportTicketIssueAnswer(input.history)) {
-    return { intent: 'grievance.escalate', ...getStableIntentPolicy('grievance.escalate') };
+    const route = { intent: 'grievance.escalate', ...getStableIntentPolicy('grievance.escalate') } as StableIntentRoute;
+    console.log('[stable-route:history-support-ticket]', {
+      route: routeLogPayload(route),
+    });
+    return route;
   }
   if (input.toolContext?.verifiedMobileLast4 && input.toolContext.pendingRoute) {
+    console.log('[stable-route:pending-route-hit]', {
+      verified_mobile_gate: input.toolContext.verifiedMobileLast4,
+      route: routeLogPayload(input.toolContext.pendingRoute),
+    });
     return input.toolContext.pendingRoute;
   }
   const apiKey = process.env.OPENAI_API_KEY;
   if (input.classifyUnknownIntent && apiKey) {
-    return resolveStableTurnRoute({ apiKey, transcript: input.transcript, history: input.history });
+    const route = await resolveStableTurnRoute({ apiKey, transcript: input.transcript, history: input.history });
+    console.log('[stable-route:classified]', {
+      route: routeLogPayload(route),
+    });
+    return route;
   }
-  return inferRouteFromLocalContext(input);
+  const route = inferRouteFromLocalContext(input);
+  console.log('[stable-route:local-inferred]', {
+    route: routeLogPayload(route),
+  });
+  return route;
 }
 
 function sessionCallVerified(input: BuildOpenAIResponseRequestInput, verifiedRef: { current: boolean }): boolean {
@@ -445,6 +528,7 @@ function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, t
     'After send_secure_link succeeds with email_pending: true, use the tool output only as source data and answer only what the caller asked.',
     'When any tool returns multiple records or more fields than the caller asked for, use the tool output only as source data and answer only the requested slice.',
     'For contextual follow-ups after a summary, infer the requested slice from recent conversation and do not repeat unrelated records, ids, amounts, banks, dates, or timelines.',
+    'If tool data includes clarification_required or clarification_question, ask only that short follow-up question naturally instead of giving fallback failure copy.',
     'Payment reassurance phrases you may use when payment is stressful (Roman script, Hinglish): aapka paisa safe hai; worst case mein refund mil jayega, koi loss nahi hoga.',
     `Money anxiety acknowledgement line (Hinglish, use when payment callers sound stressed): Main samajh sakti hoon ki aap pareshan hain. Main abhi status check karke batati hoon.`,
     `FD rate compare line (English, speak in Hinglish naturally): ${PROJECT_EXACT_LINES.rateCompare}`,
@@ -506,7 +590,7 @@ export function buildOpenAIResponseRequest(input: BuildOpenAIResponseRequestInpu
       type: 'function' as const,
       name: tool.name,
       description: tool.description,
-      parameters: toolParameters(tool.parameters as Record<string, unknown>),
+      parameters: toolParameters(tool.name, tool.parameters as Record<string, unknown>),
     }));
 
   const messages = compactHistoryWithTranscript(input.history, input.transcript);
@@ -554,6 +638,20 @@ function parseToolArguments(value: string | undefined): Record<string, unknown> 
   } catch {
     return {};
   }
+}
+
+function normalizeToolArgsForExecution(
+  input: BuildOpenAIResponseRequestInput,
+  toolName: string,
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  if (toolName === 'verify_read_access') {
+    return normalizeVerifyReadAccessArgs(input, raw);
+  }
+  if (IGNORE_MODEL_ARGS_TOOL_NAMES.has(toolName)) {
+    return {};
+  }
+  return raw;
 }
 
 /**
@@ -794,7 +892,7 @@ function declarationsForToolNames(toolNames: string[]): OpenAITool[] {
       type: 'function' as const,
       name: tool.name,
       description: tool.description,
-      parameters: toolParameters(tool.parameters as Record<string, unknown>),
+      parameters: toolParameters(tool.name, tool.parameters as Record<string, unknown>),
     }));
 }
 
@@ -804,9 +902,17 @@ function buildExecutionContext(
 ): StableToolExecutionContext {
   return {
     callVerified: input.callVerified === true || verifiedRef.current,
+    transcript: input.transcript,
+    history: input.history,
     verifiedMobileLast4: input.toolContext?.verifiedMobileLast4 ?? undefined,
     onReadAccessMobileStepVerified: input.toolContext?.onReadAccessMobileStepVerified
-      ? (lastFour) => input.toolContext?.onReadAccessMobileStepVerified?.(lastFour, input.route)
+      ? (lastFour) => {
+          console.log('[stable-route:mobile-step-verified-callback]', {
+            last_four: lastFour,
+            route_to_store: routeLogPayload(input.route),
+          });
+          return input.toolContext?.onReadAccessMobileStepVerified?.(lastFour, input.route);
+        }
       : undefined,
     createSupportTicket: input.toolContext?.createSupportTicket,
     sendSecureLink: input.toolContext?.sendSecureLink,
@@ -852,6 +958,16 @@ export async function runStableAgent(
       transcript: input.transcript,
       history: input.history,
     });
+    console.log('[stable-agent:tool-selection]', {
+      mode: 'non_stream',
+      round,
+      route: routeLogPayload(route),
+      call_verified_input: input.callVerified === true,
+      call_verified_current: verifiedRef.current,
+      verified_mobile_gate: input.toolContext?.verifiedMobileLast4 ?? null,
+      pending_route: routeLogPayload(input.toolContext?.pendingRoute),
+      selected_tools: toolNames,
+    });
 
     const forceNoTools = consecutiveVerifyToolCalls >= 2;
     const decls = declarationsForToolNames(toolNames);
@@ -890,6 +1006,13 @@ export async function runStableAgent(
     if (!fc && text) {
       const pendingTool = verifiedRef.current ? pendingAccountToolAfterVerification(route, toolCalls) : null;
       if (pendingTool) {
+        console.log('[stable-agent:forced-pending-tool]', {
+          mode: 'non_stream',
+          round,
+          route: routeLogPayload(route),
+          pending_tool: pendingTool,
+          prior_tool_calls: toolCalls,
+        });
         const callId = `forced_${pendingTool}_${round}`;
         const forcedToolResult = await executeStableToolWithContext(
           input.persona,
@@ -952,10 +1075,29 @@ export async function runStableAgent(
     }
 
     const rawArgs = parseToolArguments(fc.arguments);
-    const mergedArgs = fc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, rawArgs) : rawArgs;
+    const mergedArgs = normalizeToolArgsForExecution(input, fc.name, rawArgs);
+    console.log('[stable-agent:tool-call]', {
+      mode: 'non_stream',
+      round,
+      route: routeLogPayload(route),
+      tool: fc.name,
+      raw_arguments: rawArgs,
+      normalized_arguments: mergedArgs,
+      selected_tools: toolNames,
+    });
 
     const execCtx = buildExecutionContext(mergedBase, verifiedRef);
     const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
+    console.log('[stable-agent:tool-result]', {
+      mode: 'non_stream',
+      round,
+      route: routeLogPayload(route),
+      tool: fc.name,
+      ok: toolResult.ok,
+      verified: toolResult.data?.verified === true,
+      verification_step: toolResult.data?.verification_step ?? null,
+      mobile_step_verified: toolResult.data?.mobile_step_verified ?? null,
+    });
 
     toolCalls.push(fc.name);
 
@@ -1021,6 +1163,13 @@ export async function streamStableAgentText(
   try {
     const route = await resolveRouteForAgent(input);
     emitTiming('route_resolved', { intent: route.intent, authTier: route.authTier });
+    console.log('[stable-agent:route-resolved]', {
+      mode: 'stream',
+      route: routeLogPayload(route),
+      call_verified_input: input.callVerified === true,
+      verified_mobile_gate: input.toolContext?.verifiedMobileLast4 ?? null,
+      pending_route: routeLogPayload(input.toolContext?.pendingRoute),
+    });
     onDebug?.({ type: 'route', route });
 
     const verifiedRef = { current: input.callVerified === true };
@@ -1044,6 +1193,18 @@ export async function streamStableAgentText(
         transcript: input.transcript,
         history: input.history,
       });
+      const pass = streamPasses + 1;
+      streamPasses = pass;
+      console.log('[stable-agent:tool-selection]', {
+        mode: 'stream',
+        pass,
+        route: routeLogPayload(route),
+        call_verified_input: input.callVerified === true,
+        call_verified_current: verifiedRef.current,
+        verified_mobile_gate: input.toolContext?.verifiedMobileLast4 ?? null,
+        pending_route: routeLogPayload(input.toolContext?.pendingRoute),
+        selected_tools: toolNames,
+      });
       const toolsPayload = declarationsForToolNames(toolNames);
       const streamModel = getAgentModel();
       const request: OpenAIResponseRequest = {
@@ -1056,8 +1217,6 @@ export async function streamStableAgentText(
         stream: true,
       };
 
-      const pass = streamPasses + 1;
-      streamPasses = pass;
       emitTiming('openai_stream_request_start', {
         pass,
         model: request.model,
@@ -1177,6 +1336,12 @@ export async function streamStableAgentText(
     const executePendingAccountTool = async (): Promise<string | null> => {
       const pendingTool = pendingAccountToolAfterVerification(route, toolCalls);
       if (!pendingTool) return null;
+      console.log('[stable-agent:forced-pending-tool]', {
+        mode: 'stream',
+        route: routeLogPayload(route),
+        pending_tool: pendingTool,
+        prior_tool_calls: toolCalls,
+      });
       const callId = `forced_${pendingTool}_${toolCalls.length + 1}`;
 
       onDebug?.({
@@ -1194,6 +1359,15 @@ export async function streamStableAgentText(
         {},
         buildExecutionContext(mergedBase, verifiedRef),
       );
+      console.log('[stable-agent:tool-result]', {
+        mode: 'stream',
+        forced_after_verification: true,
+        route: routeLogPayload(route),
+        tool: pendingTool,
+        ok: forcedToolResult.ok,
+        verified: forcedToolResult.data?.verified === true,
+        verification_step: forcedToolResult.data?.verification_step ?? null,
+      });
       emitTiming('tool_execution_end', { tool: pendingTool, ok: forcedToolResult.ok, forcedAfterVerification: true });
 
       onDebug?.({
@@ -1216,11 +1390,18 @@ export async function streamStableAgentText(
     if (pass1.streamedFunction) {
       const fc = pass1.streamedFunction;
       const rawArgs = parseToolArguments(fc.arguments);
-      const mergedArgs = fc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, rawArgs) : rawArgs;
+      const mergedArgs = normalizeToolArgsForExecution(input, fc.name, rawArgs);
       const debugArgs = { ...mergedArgs } as Record<string, unknown>;
       if (!debugArgs.date_of_birth || String(debugArgs.date_of_birth).trim() === '') {
         delete debugArgs.date_of_birth;
       }
+      console.log('[stable-agent:tool-call]', {
+        mode: 'stream',
+        route: routeLogPayload(route),
+        tool: fc.name,
+        raw_arguments: rawArgs,
+        normalized_arguments: mergedArgs,
+      });
 
       onDebug?.({
         type: 'tool',
@@ -1233,6 +1414,15 @@ export async function streamStableAgentText(
       const execCtx = buildExecutionContext(mergedBase, verifiedRef);
       emitTiming('tool_execution_start', { tool: fc.name });
       const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
+      console.log('[stable-agent:tool-result]', {
+        mode: 'stream',
+        route: routeLogPayload(route),
+        tool: fc.name,
+        ok: toolResult.ok,
+        verified: toolResult.data?.verified === true,
+        verification_step: toolResult.data?.verification_step ?? null,
+        mobile_step_verified: toolResult.data?.mobile_step_verified ?? null,
+      });
       emitTiming('tool_execution_end', { tool: fc.name, ok: toolResult.ok });
 
       onDebug?.({
@@ -1284,7 +1474,16 @@ export async function streamStableAgentText(
           if (nextPass.streamedFunction) {
             const nextFc = nextPass.streamedFunction;
             const nextRawArgs = parseToolArguments(nextFc.arguments);
+            const nextMergedArgs = normalizeToolArgsForExecution(input, nextFc.name, nextRawArgs);
             const nextDebugArgs = { ...nextRawArgs } as Record<string, unknown>;
+            console.log('[stable-agent:tool-call]', {
+              mode: 'stream',
+              after_verification: true,
+              route: routeLogPayload(route),
+              tool: nextFc.name,
+              raw_arguments: nextRawArgs,
+              normalized_arguments: nextMergedArgs,
+            });
             onDebug?.({
               type: 'tool',
               tool: nextFc.name,
@@ -1314,9 +1513,19 @@ export async function streamStableAgentText(
             const nextToolResult = await executeStableToolWithContext(
               input.persona,
               nextFc.name,
-              nextFc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, nextRawArgs) : nextRawArgs,
+              nextMergedArgs,
               buildExecutionContext(mergedBase, verifiedRef),
             );
+            console.log('[stable-agent:tool-result]', {
+              mode: 'stream',
+              after_verification: true,
+              route: routeLogPayload(route),
+              tool: nextFc.name,
+              ok: nextToolResult.ok,
+              verified: nextToolResult.data?.verified === true,
+              verification_step: nextToolResult.data?.verification_step ?? null,
+              mobile_step_verified: nextToolResult.data?.mobile_step_verified ?? null,
+            });
             emitTiming('tool_execution_end', { tool: nextFc.name, ok: nextToolResult.ok });
 
             onDebug?.({

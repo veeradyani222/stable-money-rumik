@@ -112,6 +112,19 @@ function cacheKey(input: Pick<IntentClassifierInput, 'transcript' | 'history'>):
   return `${input.transcript.trim().toLowerCase()}\n---\n${historyKey.toLowerCase()}`;
 }
 
+function transcriptPreview(transcript: string): string {
+  const trimmed = transcript.trim().replace(/\s+/g, ' ');
+  return trimmed.length > 120 ? `${trimmed.slice(0, 120)}...` : trimmed;
+}
+
+function routeLogPayload(route: StableIntentRoute): Record<string, unknown> {
+  return {
+    intent: route.intent,
+    authTier: route.authTier,
+    tools: route.tools,
+  };
+}
+
 function rememberClassification(key: string, route: StableIntentRoute) {
   classificationCache.set(key, route);
   if (classificationCache.size <= CLASSIFIER_CACHE_LIMIT) return;
@@ -262,6 +275,13 @@ export async function classifyStableIntentWithAI(input: IntentClassifierInput): 
   const fallbackRoute = routeStableTurn(input.transcript, input.history);
   let lastInvalidResult: IntentClassificationResult | null = null;
 
+  console.log('[stable-intent-classifier:start]', {
+    transcript_preview: transcriptPreview(input.transcript),
+    transcript_chars: input.transcript.length,
+    history_messages: input.history.length,
+    fallback_route: routeLogPayload(fallbackRoute),
+  });
+
   for (let attempt = 1; attempt <= MAX_CLASSIFIER_INVALID_OUTPUT_ATTEMPTS; attempt += 1) {
     const response = await (input.fetcher ?? fetch)('https://api.openai.com/v1/responses', {
       method: 'POST',
@@ -338,6 +358,14 @@ export async function classifyStableIntentWithAI(input: IntentClassifierInput): 
     }
 
     const route = routeFromIntent(parsed.intent);
+    console.log('[stable-intent-classifier:accepted]', {
+      attempt,
+      model_intent: parsed.intent,
+      model_auth_tier: modelAuthTier,
+      confidence,
+      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+      route: routeLogPayload(route),
+    });
     return {
       accepted: true,
       route,
@@ -353,12 +381,27 @@ export async function classifyStableIntentWithAI(input: IntentClassifierInput): 
 export async function resolveStableTurnRoute(input: IntentClassifierInput): Promise<StableIntentRoute> {
   const key = cacheKey(input);
   const cached = classificationCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    console.log('[stable-intent-classifier:cache-hit]', {
+      transcript_preview: transcriptPreview(input.transcript),
+      history_messages: input.history.length,
+      route: routeLogPayload(cached),
+    });
+    return cached;
+  }
 
   const deterministicFallbackRoute = routeStableTurn(input.transcript, input.history);
   try {
     const classification = await classifyStableIntentWithAI(input);
     const route = classification.accepted ? classification.route : deterministicFallbackRoute;
+    console.log('[stable-intent-classifier:resolved]', {
+      accepted: classification.accepted,
+      confidence: classification.confidence,
+      reason: classification.reason,
+      model_auth_tier: classification.modelAuthTier,
+      route: routeLogPayload(route),
+      deterministic_fallback_route: routeLogPayload(deterministicFallbackRoute),
+    });
     rememberClassification(key, route);
     return route;
   } catch (error) {

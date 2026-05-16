@@ -35,6 +35,8 @@ export interface StableToolResult {
 
 export interface StableToolExecutionContext {
   callVerified?: boolean;
+  transcript?: string;
+  history?: Array<{ role: 'user' | 'model'; text: string }>;
   /** Last four digits already matched this persona on this call (server-held demo gate). */
   verifiedMobileLast4?: string | null;
   /** Fired when mobile last four matched and DOB is still required or failed; used to persist the gate. */
@@ -54,15 +56,7 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
     name: 'verify_read_access',
     description: 'Verify Tier B read access using the fallback mobile last four plus date of birth flow.',
     authTier: 'Tier B',
-    parameters: {
-      mobile_last_4:
-        'Last four digits of the registered mobile number as the caller said it (verbatim is fine, any language or script, e.g. "1123", "double one two three", "ek ek do teen", "ÙˆÙ† ÙˆÙ† Ù¹Ùˆ ØªÚ¾Ø±ÛŒ", "ÚˆØ¨Ù„ ÙˆÙ† Ù¹Ùˆ ØªÚ¾Ø±ÛŒ"). The server extracts the four digits semantically and falls back to strict digit parsing.',
-      date_of_birth: {
-        description:
-          'Date of birth as the caller said or typed (verbatim is fine, any language or script). The server compares meaning to the verified account record when configured, and falls back to strict calendar parsing.',
-        optional: true,
-      },
-    },
+    parameters: {},
   },
   {
     name: 'lookup_customer_profile',
@@ -94,17 +88,13 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
     name: 'get_fd_booking_status',
     description: 'FD booking, maturity payout, or status lookup for a verified caller.',
     authTier: 'Tier B',
-    parameters: {
-      fd_id: { description: 'Optional FD id, compact FD alias, bank name, or amount', optional: true },
-    },
+    parameters: {},
   },
   {
     name: 'get_payment_reconciliation_status',
     description: 'Payment or reconciliation lookup for a verified caller.',
     authTier: 'Tier B',
-    parameters: {
-      reference: { description: 'Optional payment reference, UTR, alias, source bank, or amount', optional: true },
-    },
+    parameters: {},
   },
   {
     name: 'get_kyc_status',
@@ -116,17 +106,13 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
     name: 'get_premature_withdrawal_quote',
     description: 'Read estimated value and penalty for premature FD withdrawal. Does not execute withdrawal.',
     authTier: 'Tier B',
-    parameters: {
-      fd_id: { description: 'Optional FD id, compact FD alias, bank name, or amount', optional: true },
-    },
+    parameters: {},
   },
   {
     name: 'get_support_ticket_status',
     description: 'Support ticket status and SLA lookup for a verified caller.',
     authTier: 'Tier B',
-    parameters: {
-      ticket_id: { description: 'Optional support ticket id, such as TKT-10052', optional: true },
-    },
+    parameters: {},
   },
   {
     name: 'get_payment_summary',
@@ -144,9 +130,7 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
     name: 'get_refund_status',
     description: 'Refund or failed-payment status overview for a verified caller.',
     authTier: 'Tier B',
-    parameters: {
-      reference: { description: 'Optional payment reference, UTR, alias, source bank, or amount', optional: true },
-    },
+    parameters: {},
   },
   {
     name: 'get_fd_rates',
@@ -294,6 +278,197 @@ function supportTicketArgs(args: Record<string, unknown>): { issue: string; prio
     issue: typeof args.issue === 'string' && args.issue.trim() ? args.issue.trim() : 'Customer requested support follow-up',
     priority: safePriority(args.priority),
   };
+}
+
+type ToolReferenceResolutionVerdict = 'resolved' | 'clarify' | 'unresolved';
+
+interface ToolReferenceResolutionResult {
+  verdict: ToolReferenceResolutionVerdict;
+  selectedReference: string | null;
+  clarificationQuestion: string;
+  modelAnswered: boolean;
+}
+
+interface ToolCandidateRecord {
+  id: string;
+  label: string;
+  kind: 'payment' | 'fd' | 'ticket';
+  attributes: Record<string, unknown>;
+}
+
+interface ToolReferenceResolutionInput {
+  apiKey: string;
+  toolName: string;
+  transcript: string;
+  history: Array<{ role: 'user' | 'model'; text: string }>;
+  candidates: ToolCandidateRecord[];
+  fetcher?: typeof fetch;
+}
+
+interface OpenAiResolverResponse {
+  output_text?: string;
+  output_parsed?: unknown;
+  output?: Array<
+    | string
+    | {
+        type?: string;
+        content?: Array<{ type?: string; text?: string; parsed?: unknown }>;
+        text?: string;
+        parsed?: unknown;
+      }
+  >;
+}
+
+function getToolReferenceResolutionModel(): string {
+  return process.env.OPENAI_TOOL_REFERENCE_MODEL || process.env.OPENAI_AGENT_MODEL || process.env.OPENAI_INTENT_MODEL || 'gpt-4o-mini';
+}
+
+function isReasoningModel(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.startsWith('gpt-5') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4');
+}
+
+function extractOpenAiJsonText(response: OpenAiResolverResponse): string {
+  if (response.output_parsed && typeof response.output_parsed === 'object') {
+    return JSON.stringify(response.output_parsed);
+  }
+  if (typeof response.output_text === 'string' && response.output_text.trim()) {
+    return response.output_text.trim();
+  }
+  if (Array.isArray(response.output)) {
+    for (const outputItem of response.output) {
+      if (typeof outputItem === 'string') continue;
+      if (!outputItem || typeof outputItem !== 'object') continue;
+      if (outputItem.parsed && typeof outputItem.parsed === 'object') {
+        return JSON.stringify(outputItem.parsed);
+      }
+      if (Array.isArray(outputItem.content)) {
+        for (const content of outputItem.content) {
+          if (!content || typeof content !== 'object') continue;
+          if (content.parsed && typeof content.parsed === 'object') {
+            return JSON.stringify(content.parsed);
+          }
+          if (typeof content.text === 'string' && content.text.trim()) {
+            return content.text.trim();
+          }
+        }
+      }
+      if (typeof outputItem.text === 'string' && outputItem.text.trim()) {
+        return outputItem.text.trim();
+      }
+    }
+  }
+  return '';
+}
+
+function parseToolReferenceResolution(text: string): Omit<ToolReferenceResolutionResult, 'modelAnswered'> | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      verdict?: unknown;
+      selected_reference?: unknown;
+      clarification_question?: unknown;
+    };
+    if (parsed.verdict !== 'resolved' && parsed.verdict !== 'clarify' && parsed.verdict !== 'unresolved') return null;
+    const selectedReference =
+      typeof parsed.selected_reference === 'string' && parsed.selected_reference.trim()
+        ? parsed.selected_reference.trim()
+        : null;
+    const clarificationQuestion =
+      typeof parsed.clarification_question === 'string' ? parsed.clarification_question.trim() : '';
+    return {
+      verdict: parsed.verdict,
+      selectedReference,
+      clarificationQuestion,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveToolReferenceWithAi(
+  input: ToolReferenceResolutionInput,
+): Promise<ToolReferenceResolutionResult> {
+  const transcript = input.transcript.trim();
+  if (!transcript || input.candidates.length === 0) {
+    return { verdict: 'unresolved', selectedReference: null, clarificationQuestion: '', modelAnswered: false };
+  }
+
+  const model = getToolReferenceResolutionModel();
+  const body = {
+    model,
+    input: [
+      {
+        role: 'user',
+        content: JSON.stringify({
+          tool_name: input.toolName,
+          latest_user_transcript: transcript,
+          recent_history: input.history.slice(-6),
+          candidates: input.candidates,
+        }),
+      },
+    ],
+    instructions: [
+      'You resolve which account record a banking support caller is referring to.',
+      'Use the full latest transcript plus recent conversation history.',
+      'The caller may speak in any language, mixed language, script, ASR spelling, shorthand, or partial identifier.',
+      'Candidates are already the allowed records for the current tool.',
+      'Return verdict=resolved only when one candidate is clearly intended.',
+      'Return verdict=clarify when more than one candidate is plausible and a short natural clarification question is needed.',
+      'Return verdict=unresolved when the caller is not referring to a candidate or there is not enough signal yet.',
+      'If verdict=resolved, selected_reference must be the exact candidate id.',
+      'If verdict=clarify, selected_reference must be empty and clarification_question must ask the most useful short follow-up using natural caller-facing wording.',
+      'Do not guess.',
+    ].join('\n'),
+    max_output_tokens: 4000,
+    stream: false,
+    ...(isReasoningModel(model) ? { reasoning: { effort: 'low' } } : {}),
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'stable_tool_reference_resolution',
+        strict: true,
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            verdict: { type: 'string', enum: ['resolved', 'clarify', 'unresolved'] },
+            selected_reference: { type: 'string' },
+            clarification_question: { type: 'string' },
+            reason: { type: 'string' },
+          },
+          required: ['verdict', 'selected_reference', 'clarification_question', 'reason'],
+        },
+      },
+    },
+  };
+
+  try {
+    const response = await (input.fetcher ?? fetch)('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${input.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      return { verdict: 'unresolved', selectedReference: null, clarificationQuestion: '', modelAnswered: false };
+    }
+
+    const json = (await response.json()) as OpenAiResolverResponse;
+    const text = extractOpenAiJsonText(json);
+    const parsed = parseToolReferenceResolution(text);
+    if (!parsed) {
+      return { verdict: 'unresolved', selectedReference: null, clarificationQuestion: '', modelAnswered: false };
+    }
+
+    return { ...parsed, modelAnswered: true };
+  } catch {
+    return { verdict: 'unresolved', selectedReference: null, clarificationQuestion: '', modelAnswered: false };
+  }
 }
 
 type VerifyReadMobilePhase =
@@ -1087,6 +1262,180 @@ function executeSupportTicketStatus(persona: PersonaSeed, args: Record<string, u
   };
 }
 
+function paymentCandidateRecord(payment: PaymentSeed): ToolCandidateRecord {
+  return {
+    id: payment.payment_reference,
+    label: `${payment.payment_reference} ${payment.source_bank} ${payment.amount}`,
+    kind: 'payment',
+    attributes: {
+      payment_reference: payment.payment_reference,
+      aliases: payment.aliases,
+      source_bank: payment.source_bank,
+      amount: payment.amount,
+      status: payment.status,
+    },
+  };
+}
+
+function fdCandidateRecord(fd: FixedDepositSeed): ToolCandidateRecord {
+  return {
+    id: fd.fd_id,
+    label: `${fd.fd_id} ${fd.bank} ${fd.amount}`,
+    kind: 'fd',
+    attributes: {
+      fd_id: fd.fd_id,
+      bank: fd.bank,
+      amount: fd.amount,
+      status: fd.status,
+      maturity_date: fd.maturity_date,
+    },
+  };
+}
+
+function ticketCandidateRecord(ticket: PersonaSeed['open_tickets'][number]): ToolCandidateRecord {
+  return {
+    id: ticket.ticket_id,
+    label: `${ticket.ticket_id} ${ticket.issue}`,
+    kind: 'ticket',
+    attributes: {
+      ticket_id: ticket.ticket_id,
+      issue: ticket.issue,
+      status: ticket.status,
+      priority: ticket.priority,
+    },
+  };
+}
+
+function clarificationResult(
+  summary: string,
+  data: Record<string, unknown>,
+): StableToolResult {
+  return {
+    ok: false,
+    summary,
+    data: {
+      state: 'clarification_required',
+      ...data,
+    },
+  };
+}
+
+async function maybeResolveToolArgsWithAi(
+  persona: PersonaSeed,
+  toolName: string,
+  args: Record<string, unknown>,
+  context: StableToolExecutionContext,
+): Promise<{ args: Record<string, unknown>; immediate?: StableToolResult }> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim() || (context.fetcher ? 'test-openai-key' : '');
+  const transcript = context.transcript?.trim() ?? '';
+  const history = context.history ?? [];
+  if (!apiKey || !transcript) {
+    return { args };
+  }
+
+  const directReference =
+    toolName === 'get_payment_reconciliation_status' || toolName === 'get_refund_status'
+      ? typeof args.reference === 'string' && args.reference.trim()
+        ? args.reference.trim()
+        : ''
+      : toolName === 'get_fd_booking_status' || toolName === 'get_premature_withdrawal_quote'
+        ? typeof args.fd_id === 'string' && args.fd_id.trim()
+          ? args.fd_id.trim()
+          : ''
+        : toolName === 'get_support_ticket_status'
+          ? typeof args.ticket_id === 'string' && args.ticket_id.trim()
+            ? args.ticket_id.trim()
+            : ''
+          : '';
+
+  let candidates: ToolCandidateRecord[] = [];
+  let applyResolvedArgs: (selectedReference: string) => Record<string, unknown> = () => args;
+  let clarificationFromCandidates: (question: string) => StableToolResult;
+
+  switch (toolName) {
+    case 'get_payment_reconciliation_status':
+    case 'get_refund_status':
+      candidates = persona.payments.map(paymentCandidateRecord);
+      applyResolvedArgs = (selectedReference) => ({ ...args, reference: selectedReference });
+      clarificationFromCandidates = (question) =>
+        clarificationResult('[neutral] Payment identify karne ke liye thoda aur clear kar dijiye.', {
+          intent_id: toolName === 'get_refund_status' ? 'refund.status' : 'payment.failed',
+          clarification_question: question,
+          payments: persona.payments.map((payment) => ({
+            payment_reference: payment.payment_reference,
+            amount: payment.amount,
+            source_bank: payment.source_bank,
+            status: payment.status,
+          })),
+          match_count: persona.payments.length,
+        });
+      break;
+    case 'get_fd_booking_status':
+    case 'get_premature_withdrawal_quote': {
+      const fdSource =
+        toolName === 'get_premature_withdrawal_quote'
+          ? persona.fixed_deposits.filter((fd) => fd.premature_withdrawal_estimate !== null)
+          : persona.fixed_deposits;
+      candidates = fdSource.map(fdCandidateRecord);
+      applyResolvedArgs = (selectedReference) => ({ ...args, fd_id: selectedReference });
+      clarificationFromCandidates = (question) =>
+        clarificationResult('[neutral] FD identify karne ke liye thoda aur clear kar dijiye.', {
+          intent_id: toolName === 'get_premature_withdrawal_quote' ? 'fd.withdraw.premature' : 'fd.book.status',
+          clarification_question: question,
+          fixed_deposits: fdSource.map((fd) => ({
+            fd_id: fd.fd_id,
+            amount: fd.amount,
+            bank: fd.bank,
+            status: fd.status,
+          })),
+          match_count: fdSource.length,
+        });
+      break;
+    }
+    case 'get_support_ticket_status':
+      candidates = persona.open_tickets.map(ticketCandidateRecord);
+      applyResolvedArgs = (selectedReference) => ({ ...args, ticket_id: selectedReference });
+      clarificationFromCandidates = (question) =>
+        clarificationResult('[neutral] Ticket identify karne ke liye thoda aur clear kar dijiye.', {
+          intent_id: 'ticket.status',
+          clarification_question: question,
+          tickets: persona.open_tickets.map((ticket) => ({
+            ticket_id: ticket.ticket_id,
+            issue: ticket.issue,
+            status: ticket.status,
+            sla: ticket.sla,
+          })),
+          match_count: persona.open_tickets.length,
+        });
+      break;
+    default:
+      return { args };
+  }
+
+  if (candidates.length <= 1 && !directReference) {
+    return { args };
+  }
+
+  const resolved = await resolveToolReferenceWithAi({
+    apiKey,
+    toolName,
+    transcript,
+    history,
+    candidates,
+    fetcher: context.fetcher,
+  });
+
+  if (resolved.verdict === 'resolved' && resolved.selectedReference) {
+    return { args: applyResolvedArgs(resolved.selectedReference) };
+  }
+
+  if (resolved.verdict === 'clarify' && resolved.clarificationQuestion) {
+    return { args, immediate: clarificationFromCandidates(resolved.clarificationQuestion) };
+  }
+
+  return { args };
+}
+
 export function executeStableTool(
   persona: PersonaSeed,
   toolName: string,
@@ -1223,13 +1572,19 @@ export async function executeStableToolWithContext(
     return context.sendSecureLink({ action, ...(fdId ? { fd_id: fdId } : {}) });
   }
 
+  const resolved = await maybeResolveToolArgsWithAi(persona, canonical, args, context);
+  if (resolved.immediate) {
+    return resolved.immediate;
+  }
+  const effectiveArgs = resolved.args;
+
   let result: StableToolResult;
   if (canonical === 'verify_read_access' || canonical === 'find_customer_by_mobile_last_4') {
-    result = await verifyReadAccessWithAi(persona, args, context);
+    result = await verifyReadAccessWithAi(persona, effectiveArgs, context);
   } else if (canonical === 'verify_customer_dob') {
-    result = await legacyDobVerification(persona, args);
+    result = await legacyDobVerification(persona, effectiveArgs);
   } else {
-    result = executeStableTool(persona, canonical, args, context);
+    result = executeStableTool(persona, canonical, effectiveArgs, context);
   }
 
   if (

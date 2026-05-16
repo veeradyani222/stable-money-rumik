@@ -281,10 +281,37 @@ export async function getDemoCallPendingRouteFromStore(
   callId?: unknown,
 ): Promise<StableIntentRoute | null> {
   try {
-    return (await getPersistedDemoCallPendingRoute(pool, sessionId, callId)) ?? getDemoCallPendingRoute(sessionId, callId);
+    const persisted = await getPersistedDemoCallPendingRoute(pool, sessionId, callId);
+    const fallback = persisted ? null : getDemoCallPendingRoute(sessionId, callId);
+    const route = persisted ?? fallback;
+    console.log('[stable-session-auth:pending-route-read]', {
+      session_id: sessionId,
+      call_id: normalizedCallId(callId),
+      source: persisted ? 'persisted' : fallback ? 'memory' : 'none',
+      route: route
+        ? {
+            intent: route.intent,
+            authTier: route.authTier,
+            tools: route.tools,
+          }
+        : null,
+    });
+    return route;
   } catch (error) {
     if (!isMissingVerificationTableError(error)) throw error;
-    return getDemoCallPendingRoute(sessionId, callId);
+    const route = getDemoCallPendingRoute(sessionId, callId);
+    console.log('[stable-session-auth:pending-route-read-fallback]', {
+      session_id: sessionId,
+      call_id: normalizedCallId(callId),
+      route: route
+        ? {
+            intent: route.intent,
+            authTier: route.authTier,
+            tools: route.tools,
+          }
+        : null,
+    });
+    return route;
   }
 }
 
@@ -295,12 +322,35 @@ export async function markDemoCallVerifiedMobileLastFourInStore(
   lastFour: string,
   pendingRoute?: StableIntentRoute | null,
 ): Promise<void> {
+  console.log('[stable-session-auth:mobile-step-store-start]', {
+    session_id: sessionId,
+    call_id: normalizedCallId(callId),
+    last_four: lastFourDigits(lastFour),
+    pending_route: pendingRoute
+      ? {
+          intent: pendingRoute.intent,
+          authTier: pendingRoute.authTier,
+          tools: pendingRoute.tools,
+        }
+      : null,
+  });
   markDemoCallVerifiedMobileLastFour(sessionId, callId, lastFour);
   markDemoCallPendingRoute(sessionId, callId, pendingRoute);
   try {
     await markPersistedDemoCallVerifiedMobileLastFour(pool, sessionId, callId, lastFour, pendingRoute);
+    console.log('[stable-session-auth:mobile-step-store-complete]', {
+      session_id: sessionId,
+      call_id: normalizedCallId(callId),
+      last_four: lastFourDigits(lastFour),
+      pending_route_intent: pendingRoute?.intent ?? null,
+    });
   } catch (error) {
     if (!isMissingVerificationTableError(error)) throw error;
+    console.warn('[stable-session-auth:mobile-step-store-persist-skipped]', {
+      session_id: sessionId,
+      call_id: normalizedCallId(callId),
+      reason: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

@@ -48,6 +48,22 @@ test('stableToolDeclarations expose the exact Project.md tool contract to the ag
   const verifyTool = stableToolDeclarations.find((tool) => tool.name === 'verify_read_access');
   assert.ok(verifyTool);
   assert.doesNotMatch(JSON.stringify(verifyTool.parameters), /YYYY-MM-DD|preferably/i);
+  assert.deepEqual(verifyTool.parameters, {});
+
+  for (const toolName of [
+    'get_fd_booking_status',
+    'get_payment_reconciliation_status',
+    'get_kyc_status',
+    'get_premature_withdrawal_quote',
+    'get_support_ticket_status',
+    'get_payment_summary',
+    'get_fd_summary',
+    'get_refund_status',
+  ]) {
+    const tool = stableToolDeclarations.find((item) => item.name === toolName);
+    assert.ok(tool, `${toolName} should be declared`);
+    assert.deepEqual(tool.parameters, {}, `${toolName} should not expose model-filled lookup args`);
+  }
 });
 
 test('executeStableTool returns Rumik-safe Hinglish summaries for every stable tool', () => {
@@ -267,6 +283,80 @@ test('executeStableTool can identify a payment by amount when multiple payments 
   assert.equal(result.ok, true);
   assert.match(result.summary, /PAY-5148/);
   assert.equal(result.data?.payment_reference, 'PAY-5148');
+});
+
+test('executeStableToolWithContext can resolve fuzzy payment references from transcript context with AI', async () => {
+  const persona = getPersonaById('cust_demo_003');
+  assert.ok(persona);
+
+  let fetchCalls = 0;
+  const result = await executeStableToolWithContext(
+    persona,
+    'get_payment_reconciliation_status',
+    {},
+    {
+      callVerified: true,
+      transcript: 'sab se pehle meri jo mb three three four five hai woh kis bank se hai',
+      history: [
+        { role: 'user', text: 'mere payments ke baare mein batao' },
+        { role: 'model', text: '[neutral] Aapki do payments settled hain.' },
+      ],
+      fetcher: (async () => {
+        fetchCalls += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            output_text: JSON.stringify({
+              verdict: 'resolved',
+              selected_reference: 'PAY-3345',
+              clarification_question: '',
+              reason: 'Caller referred to the payment ending in three three four five.',
+            }),
+          }),
+        } as Response;
+      }) as typeof fetch,
+    },
+  );
+
+  assert.equal(fetchCalls, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.payment_reference, 'PAY-3345');
+  assert.match(result.summary, /HDFC/i);
+});
+
+test('executeStableToolWithContext returns structured clarification when AI cannot disambiguate payment reference', async () => {
+  const persona = getPersonaById('cust_demo_003');
+  assert.ok(persona);
+
+  const result = await executeStableToolWithContext(
+    persona,
+    'get_payment_reconciliation_status',
+    {},
+    {
+      callVerified: true,
+      transcript: 'woh wali payment batao',
+      history: [{ role: 'user', text: 'mere payments ke baare mein batao' }],
+      fetcher: (async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            output_text: JSON.stringify({
+              verdict: 'clarify',
+              selected_reference: '',
+              clarification_question: 'Aap HDFC wali payment ki baat kar rahe hain ya SBI wali?',
+              reason: 'Caller did not identify which payment.',
+            }),
+          }),
+        }) as Response) as typeof fetch,
+    },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.data?.state, 'clarification_required');
+  assert.match(String(result.data?.clarification_question), /HDFC|SBI/);
+  assert.equal(result.data?.intent_id, 'payment.failed');
 });
 
 test('executeStableTool asks which fixed deposit when a customer has multiple FDs and no identifier', () => {

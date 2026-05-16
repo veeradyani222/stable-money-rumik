@@ -41,6 +41,20 @@ function validHistory(value: unknown): AgentHistoryMessage[] {
     .slice(-AGENT_MAX_HISTORY_MESSAGES);
 }
 
+function transcriptPreview(transcript: string): string {
+  const trimmed = transcript.trim().replace(/\s+/g, ' ');
+  return trimmed.length > 120 ? `${trimmed.slice(0, 120)}...` : trimmed;
+}
+
+function routeLogPayload(route: StableIntentRoute | null | undefined): Record<string, unknown> | null {
+  if (!route) return null;
+  return {
+    intent: route.intent,
+    authTier: route.authTier,
+    tools: route.tools,
+  };
+}
+
 export async function POST(request: Request) {
   let body: unknown;
   try {
@@ -69,6 +83,18 @@ export async function POST(request: Request) {
     const pendingRoute = verifiedMobileLast4
       ? await getDemoCallPendingRouteFromStore(pool, sessionId, callId)
       : null;
+    const callVerified = await getDemoCallVerifiedFromStore(pool, sessionId, callId);
+    const history = validHistory((body as { history?: unknown }).history);
+    console.log('[stable-agent-api:stream-request]', {
+      session_id: sessionId,
+      call_id: String(callId ?? 'default'),
+      transcript_preview: transcriptPreview(transcript),
+      transcript_chars: transcript.length,
+      history_messages: history.length,
+      call_verified: callVerified,
+      verified_mobile_gate: verifiedMobileLast4 ?? null,
+      pending_route: routeLogPayload(pendingRoute),
+    });
     const result = await pool.query(
       `SELECT persona_id, customer_id, name, mobile_last_4, date_of_birth::text AS date_of_birth,
         kyc_status, kyc_rejection_reason, kyc_eta, kyc_next_step,
@@ -87,7 +113,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Persona not selected' }, { status: 409 });
     }
 
-    const history = validHistory((body as { history?: unknown }).history);
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const writer = createSseWriter(controller);
@@ -98,7 +123,7 @@ export async function POST(request: Request) {
               persona,
               transcript: transcript.trim(),
               history,
-              callVerified: await getDemoCallVerifiedFromStore(pool, sessionId, callId),
+              callVerified,
               classifyUnknownIntent: true,
               toolContext: {
                 createSupportTicket: (args) => createSupportTicketForSession(sessionId, args),

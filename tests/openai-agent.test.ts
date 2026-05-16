@@ -588,6 +588,50 @@ test('buildOpenAIResponseRequest exposes FD summary tool after verification', ()
   assert.match(request.instructions, /Call verification status: verified/i);
 });
 
+test('buildOpenAIResponseRequest exposes account read tools without model-filled lookup args', () => {
+  const persona = getPersonaById('cust_demo_003');
+  assert.ok(persona);
+
+  const unverifiedRequest = buildOpenAIResponseRequest({
+    persona,
+    transcript: 'Mera FD status batao',
+    history: [],
+    route: testRoute('fd.book.status'),
+  });
+
+  const verifyTool = unverifiedRequest.tools?.find((tool) => tool.name === 'verify_read_access');
+  assert.ok(verifyTool);
+  assert.deepEqual(verifyTool.parameters.properties, {});
+  assert.deepEqual(verifyTool.parameters.required, []);
+
+  const verifiedRoutes: Array<Exclude<StableIntentId, 'unknown'>> = [
+    'payment.failed',
+    'fd.book.status',
+    'fd.withdraw.premature',
+    'kyc.status',
+    'ticket.status',
+    'payment.summary',
+    'fd.summary',
+    'refund.status',
+  ];
+
+  for (const intent of verifiedRoutes) {
+    const request = buildOpenAIResponseRequest({
+      persona,
+      transcript: 'Account detail batao',
+      history: [],
+      callVerified: true,
+      route: testRoute(intent),
+    });
+
+    for (const tool of request.tools ?? []) {
+      if (tool.name === 'send_secure_link') continue;
+      assert.deepEqual(tool.parameters.properties, {}, `${tool.name} should expose no model-filled args`);
+      assert.deepEqual(tool.parameters.required, [], `${tool.name} should require no model-filled args`);
+    }
+  }
+});
+
 test('extractOpenAIText returns text from response output messages', () => {
   const text = extractOpenAIText({
     output: [
