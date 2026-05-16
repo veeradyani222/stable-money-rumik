@@ -40,8 +40,9 @@ export async function POST(request: Request) {
     ? [primaryPayment.payment_reference, ...primaryPayment.aliases]
     : null;
 
+  const pool = getPool();
   try {
-    const pool = getPool();
+    await pool.query('BEGIN');
     const result = await pool.query(
       `UPDATE demo_users SET
         persona_id = $2,
@@ -126,9 +127,27 @@ export async function POST(request: Request) {
     );
 
     if (result.rowCount === 0) {
+      await pool.query('ROLLBACK');
       return NextResponse.json({ error: 'Session not found' }, { status: 404 });
     }
+
+    await pool.query(
+      `DELETE FROM demo_call_verifications
+       WHERE session_id = $1`,
+      [sessionIdRaw],
+    );
+    await pool.query(
+      `DELETE FROM demo_call_mobile_verifications
+       WHERE session_id = $1`,
+      [sessionIdRaw],
+    );
+    await pool.query('COMMIT');
   } catch {
+    try {
+      await pool.query('ROLLBACK');
+    } catch {
+      // ignore rollback errors
+    }
     return NextResponse.json({ error: 'Could not save persona. Try again.' }, { status: 500 });
   }
 

@@ -26,3 +26,16 @@ test('agent page turns the persona panel into a phone side drawer', () => {
   assert.match(mobileSource, /\.agent-page--panel-open\s+\.mobile-panel-backdrop\s*{[\s\S]*?display:\s*block;/);
   assert.doesNotMatch(mobileSource, /\.mobile-panel-close\s*{/);
 });
+
+test('agent page lays out side-panel persona chooser as equal cards', () => {
+  assert.match(css, /\.panel-tabs\s*{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(css, /\.panel-tab\s*{[\s\S]*?min-width:\s*0;/);
+  assert.match(css, /\.panel-tab\s*{[\s\S]*?font-size:\s*clamp\(/);
+  assert.match(css, /\.panel-tab\s*{[\s\S]*?text-overflow:\s*ellipsis;/);
+  assert.match(css, /\.persona-change-grid\s*{[\s\S]*?display:\s*grid;/);
+  assert.match(css, /\.persona-change-grid\s*{[\s\S]*?grid-auto-rows:\s*1fr;/);
+  assert.match(css, /\.persona-change-card\s*{[\s\S]*?height:\s*100%;/);
+  assert.match(css, /\.persona-change-card\s*{[\s\S]*?width:\s*100%;/);
+  assert.match(css, /\.persona-change-card\s+\.persona-card__body\s*{[\s\S]*?min-height:\s*132px;/);
+  assert.match(css, /\.persona-change-card-status\s*{[\s\S]*?word-break:\s*normal;/);
+});
