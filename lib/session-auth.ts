@@ -1,5 +1,6 @@
 import { cookies } from 'next/headers';
 
+import type { StableIntentRoute } from '@/lib/agent/stable-policy';
 import { DEMO_SESSION_COOKIE } from './session-cookie';
 
 interface Queryable {
@@ -13,6 +14,8 @@ export type DemoSessionResolution =
 const callVerificationByKey = new Map<string, boolean>();
 /** Last four digits already matched for this session+call; keeps DOB retries from re-asking mobile. */
 const callVerifiedMobileLastFourByKey = new Map<string, string>();
+/** Account route selected before verification; keeps DOB turns from re-classifying intent. */
+const callPendingRouteByKey = new Map<string, StableIntentRoute>();
 
 function asSessionId(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -70,6 +73,7 @@ export function getDemoCallVerified(sessionId: string, callId?: unknown): boolea
 export function markDemoCallVerified(sessionId: string, callId?: unknown) {
   callVerificationByKey.set(callStateKey(sessionId, callId), true);
   callVerifiedMobileLastFourByKey.delete(callStateKey(sessionId, callId));
+  callPendingRouteByKey.delete(callStateKey(sessionId, callId));
 }
 
 export function getDemoCallVerifiedMobileLastFour(sessionId: string, callId?: unknown): string | null {
@@ -82,8 +86,22 @@ export function markDemoCallVerifiedMobileLastFour(sessionId: string, callId: un
   callVerifiedMobileLastFourByKey.set(callStateKey(sessionId, callId), digits);
 }
 
+export function getDemoCallPendingRoute(sessionId: string, callId?: unknown): StableIntentRoute | null {
+  return callPendingRouteByKey.get(callStateKey(sessionId, callId)) ?? null;
+}
+
+export function markDemoCallPendingRoute(
+  sessionId: string,
+  callId: unknown | undefined,
+  pendingRoute: StableIntentRoute | null | undefined,
+): void {
+  if (!pendingRoute || pendingRoute.intent === 'unknown') return;
+  callPendingRouteByKey.set(callStateKey(sessionId, callId), pendingRoute);
+}
+
 export function clearDemoCallVerifiedMobileLastFour(sessionId: string, callId?: unknown): void {
   callVerifiedMobileLastFourByKey.delete(callStateKey(sessionId, callId));
+  callPendingRouteByKey.delete(callStateKey(sessionId, callId));
 }
 
 export async function getPersistedDemoCallVerified(
@@ -131,21 +149,59 @@ export async function getPersistedDemoCallVerifiedMobileLastFour(
   return digits.length === 4 ? digits : null;
 }
 
+export async function getPersistedDemoCallPendingRoute(
+  pool: Queryable,
+  sessionId: string,
+  callId?: unknown,
+): Promise<StableIntentRoute | null> {
+  const result = await pool.query<{ pending_route: StableIntentRoute | null }>(
+    `SELECT pending_route
+     FROM demo_call_mobile_verifications
+     WHERE session_id = $1 AND call_id = $2
+     LIMIT 1`,
+    [sessionId, normalizedCallId(callId)],
+  );
+  const route = result.rows?.[0]?.pending_route;
+  return route && typeof route === 'object' && route.intent !== 'unknown' ? route : null;
+}
+
 export async function markPersistedDemoCallVerifiedMobileLastFour(
   pool: Queryable,
   sessionId: string,
   callId: unknown | undefined,
   lastFour: string,
+  pendingRoute?: StableIntentRoute | null,
 ): Promise<void> {
   const digits = lastFourDigits(lastFour);
   if (digits.length !== 4) return;
-  await pool.query(
-    `INSERT INTO demo_call_mobile_verifications (session_id, call_id, mobile_last_4)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (session_id, call_id)
-     DO UPDATE SET mobile_last_4 = EXCLUDED.mobile_last_4, verified_at = NOW()`,
-    [sessionId, normalizedCallId(callId), digits],
-  );
+  if (!pendingRoute) {
+    await pool.query(
+      `INSERT INTO demo_call_mobile_verifications (session_id, call_id, mobile_last_4)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (session_id, call_id)
+       DO UPDATE SET mobile_last_4 = EXCLUDED.mobile_last_4, verified_at = NOW()`,
+      [sessionId, normalizedCallId(callId), digits],
+    );
+    return;
+  }
+  try {
+    await pool.query(
+      `INSERT INTO demo_call_mobile_verifications (session_id, call_id, mobile_last_4, pending_route)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (session_id, call_id)
+       DO UPDATE SET mobile_last_4 = EXCLUDED.mobile_last_4, pending_route = EXCLUDED.pending_route, verified_at = NOW()`,
+      [sessionId, normalizedCallId(callId), digits, pendingRoute ?? null],
+    );
+  } catch (error) {
+    if (!isMissingVerificationTableError(error)) throw error;
+    await pool.query(
+      `INSERT INTO demo_call_mobile_verifications (session_id, call_id, mobile_last_4)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (session_id, call_id)
+       DO UPDATE SET mobile_last_4 = EXCLUDED.mobile_last_4, verified_at = NOW()`,
+      [sessionId, normalizedCallId(callId), digits],
+    );
+  }
 }
 
 export async function clearPersistedDemoCallVerifiedMobileLastFour(
@@ -165,8 +221,10 @@ function isMissingVerificationTableError(error: unknown): boolean {
   const code = typeof error === 'object' && error ? (error as { code?: unknown }).code : undefined;
   return (
     code === '42P01' ||
+    code === '42703' ||
     message.includes('demo_call_verifications') ||
-    message.includes('demo_call_mobile_verifications')
+    message.includes('demo_call_mobile_verifications') ||
+    message.includes('pending_route')
   );
 }
 
@@ -217,15 +275,30 @@ export async function getDemoCallVerifiedMobileLastFourFromStore(
   }
 }
 
+export async function getDemoCallPendingRouteFromStore(
+  pool: Queryable,
+  sessionId: string,
+  callId?: unknown,
+): Promise<StableIntentRoute | null> {
+  try {
+    return (await getPersistedDemoCallPendingRoute(pool, sessionId, callId)) ?? getDemoCallPendingRoute(sessionId, callId);
+  } catch (error) {
+    if (!isMissingVerificationTableError(error)) throw error;
+    return getDemoCallPendingRoute(sessionId, callId);
+  }
+}
+
 export async function markDemoCallVerifiedMobileLastFourInStore(
   pool: Queryable,
   sessionId: string,
   callId: unknown | undefined,
   lastFour: string,
+  pendingRoute?: StableIntentRoute | null,
 ): Promise<void> {
   markDemoCallVerifiedMobileLastFour(sessionId, callId, lastFour);
+  markDemoCallPendingRoute(sessionId, callId, pendingRoute);
   try {
-    await markPersistedDemoCallVerifiedMobileLastFour(pool, sessionId, callId, lastFour);
+    await markPersistedDemoCallVerifiedMobileLastFour(pool, sessionId, callId, lastFour, pendingRoute);
   } catch (error) {
     if (!isMissingVerificationTableError(error)) throw error;
   }
@@ -237,4 +310,5 @@ export const markDemoCallVerifiedFallbackForTests = markDemoCallVerified;
 export function resetDemoCallStateForTests() {
   callVerificationByKey.clear();
   callVerifiedMobileLastFourByKey.clear();
+  callPendingRouteByKey.clear();
 }

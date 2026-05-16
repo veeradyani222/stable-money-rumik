@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Semantic date-of-birth check: compares caller utterance (ASR / chat text)
  * to the canonical YYYY-MM-DD on file. The AI verdict is final for this check.
  */

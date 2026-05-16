@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Semantic mobile-last-four check: compares caller utterance (ASR / chat text)
  * to the canonical last four digits on file. Tolerant of any language,
  * script, or spoken pattern (English, Hindi, Hinglish, Urdu, Arabic script,

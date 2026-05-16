@@ -1,4 +1,4 @@
-import { normalizeOpenAITranscript } from '@/lib/voice/transcript-text';
+﻿import { normalizeOpenAITranscript } from '@/lib/voice/transcript-text';
 
 interface OpenAITranscribeResponse {
   text?: string;
@@ -16,8 +16,8 @@ export class OpenAITranscribeError extends Error {
   }
 }
 
-export const OPENAI_ROMAN_TRANSCRIPT_PROMPT =
-  'Transcribe the complete user utterance from this call audio. The speaker may use English, Hindi, or Hinglish. Return natural Roman-script text preserving their meaning. Use Latin letters for Hindi/Hinglish. Never output Devanagari, Arabic, Urdu, or Farsi script. Return only transcript text, no markdown, no labels. Do not omit any words. Do not add any words. If the audio is not clear, return your best guess for the complete utterance.';
+export const OPENAI_TRANSCRIPT_PROMPT =
+  'Transcribe the complete user utterance from this call audio. Preserve the user language and script as spoken or typed, including Devanagari, Bangla, Gurmukhi, Urdu, Arabic, Tamil, Telugu, Kannada, Malayalam, Gujarati, Marathi, English, Hindi, Hinglish, or mixed script. Return only transcript text, no markdown, no labels. Do not omit any words. Do not add any words. If the audio is not clear, return your best guess for the complete utterance.';
 
 function getSttModel(): string {
   return process.env.OPENAI_STT_MODEL || 'gpt-4o-mini-transcribe';
@@ -41,7 +41,7 @@ export async function transcribeOpenAIAudio(input: {
   formData.append('model', model);
   formData.append('response_format', 'json');
   formData.append('temperature', '0');
-  formData.append('prompt', OPENAI_ROMAN_TRANSCRIPT_PROMPT);
+  formData.append('prompt', OPENAI_TRANSCRIPT_PROMPT);
 
   const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',

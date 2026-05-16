@@ -76,9 +76,13 @@ CREATE TABLE IF NOT EXISTS demo_call_mobile_verifications (
   session_id TEXT NOT NULL REFERENCES demo_users(session_id) ON DELETE CASCADE,
   call_id TEXT NOT NULL,
   mobile_last_4 TEXT NOT NULL,
+  pending_route JSONB,
   verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (session_id, call_id)
 );
+
+ALTER TABLE demo_call_mobile_verifications
+  ADD COLUMN IF NOT EXISTS pending_route JSONB;
 
 CREATE INDEX IF NOT EXISTS demo_call_mobile_verifications_session_idx
   ON demo_call_mobile_verifications (session_id);

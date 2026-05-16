@@ -14,6 +14,7 @@ import { buildPersonaFromDemoUserRow } from '@/lib/demo-users';
 import {
   getDemoCallVerifiedFromStore,
   getDemoCallVerifiedMobileLastFourFromStore,
+  getDemoCallPendingRouteFromStore,
   getRequestDemoSessionId,
   markDemoCallVerifiedInStore,
   markDemoCallVerifiedMobileLastFourInStore,
@@ -65,6 +66,9 @@ export async function POST(request: Request) {
     const callId = (body as { call_id?: unknown }).call_id;
     const pool = getPool();
     const verifiedMobileLast4 = await getDemoCallVerifiedMobileLastFourFromStore(pool, sessionId, callId);
+    const pendingRoute = verifiedMobileLast4
+      ? await getDemoCallPendingRouteFromStore(pool, sessionId, callId)
+      : null;
     const result = await pool.query(
       `SELECT persona_id, customer_id, name, mobile_last_4, date_of_birth::text AS date_of_birth,
         kyc_status, kyc_rejection_reason, kyc_eta, kyc_next_step,
@@ -100,8 +104,9 @@ export async function POST(request: Request) {
                 createSupportTicket: (args) => createSupportTicketForSession(sessionId, args),
                 sendSecureLink: (args) => sendSecureLinkForSession(sessionId, args),
                 verifiedMobileLast4: verifiedMobileLast4 ?? undefined,
-                onReadAccessMobileStepVerified: (lastFour) => {
-                  return markDemoCallVerifiedMobileLastFourInStore(pool, sessionId, callId, lastFour);
+                pendingRoute,
+                onReadAccessMobileStepVerified: (lastFour, route) => {
+                  return markDemoCallVerifiedMobileLastFourInStore(pool, sessionId, callId, lastFour, route);
                 },
               },
             },

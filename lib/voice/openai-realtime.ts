@@ -1,4 +1,4 @@
-import { OPENAI_ROMAN_TRANSCRIPT_PROMPT } from './openai-transcribe';
+import { OPENAI_TRANSCRIPT_PROMPT } from './openai-transcribe';
 
 /**
  * Realtime `session.audio.input.transcription.prompt` is only valid for legacy-style Whisper ids.
@@ -59,7 +59,7 @@ export function buildOpenAIRealtimeClientSecretRequest() {
     ...(transcriptionLanguage ? { language: transcriptionLanguage } : {}),
   };
   if (realtimeTranscriptionModelSupportsPrompt(transcriptionModel)) {
-    transcription.prompt = OPENAI_ROMAN_TRANSCRIPT_PROMPT;
+    transcription.prompt = OPENAI_TRANSCRIPT_PROMPT;
   }
 
   return {

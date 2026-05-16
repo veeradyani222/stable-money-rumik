@@ -11,6 +11,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "livekit-server-sdk": "^2.15.3",
     "next": "15.3.6",
     "pg": "^8.20.0",

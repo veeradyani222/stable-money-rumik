@@ -329,7 +329,7 @@ Copy .env.example to .env.local and fill in values.
 | OPENAI_STT_MODEL | gpt-4o-mini-transcribe | Batch STT |
 | OPENAI_REALTIME_TRANSCRIBE_MODEL | STT model | Realtime transcription |
 | OPENAI_REALTIME_TRANSCRIBE_LANGUAGE | — | Language hint |
-| OPENAI_REALTIME_TRANSCRIPTION_USE_PROMPT | on for Whisper | Roman transcript prompt |
+| OPENAI_REALTIME_TRANSCRIPTION_USE_PROMPT | on for Whisper | Language/script-preserving transcript prompt |
 | STABLE_DISABLE_AI_DOB | off | Use strict date parse only (tests) |
 | GMAIL_USER | — | SMTP username for demo emails |
 | GMAIL_APP_PASSWORD | — | App password |

@@ -1,9 +1,9 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { OPENAI_ROMAN_TRANSCRIPT_PROMPT, transcribeOpenAIAudio } from '../lib/voice/openai-transcribe';
+import { OPENAI_TRANSCRIPT_PROMPT, transcribeOpenAIAudio } from '../lib/voice/openai-transcribe';
 
 type CapturedRequest = { url: string; method?: string; headers?: HeadersInit; body?: BodyInit | null };
 
@@ -48,8 +48,8 @@ test('transcribeOpenAIAudio sends webm audio to the configured OpenAI STT model'
     assert.equal(capturedRequest.body.get('model'), 'gpt-4o-transcribe');
     assert.equal(capturedRequest.body.get('response_format'), 'json');
     assert.equal(capturedRequest.body.get('temperature'), '0');
-    assert.match(String(capturedRequest.body.get('prompt')), /Hindi, or Hinglish/);
-    assert.match(String(capturedRequest.body.get('prompt')), /Never output Devanagari, Arabic, Urdu, or Farsi script/);
+    assert.match(String(capturedRequest.body.get('prompt')), /Preserve the user language and script/i);
+    assert.doesNotMatch(String(capturedRequest.body.get('prompt')), /Never output Devanagari/i);
     assert.ok(capturedRequest.body.get('file') instanceof File);
   } finally {
     globalThis.fetch = originalFetch;
@@ -59,8 +59,9 @@ test('transcribeOpenAIAudio sends webm audio to the configured OpenAI STT model'
 });
 
 test('transcription prompt avoids domain-specific example phrases that can leak into output', () => {
-  assert.doesNotMatch(OPENAI_ROMAN_TRANSCRIPT_PROMPT, /KYC status/i);
-  assert.doesNotMatch(OPENAI_ROMAN_TRANSCRIPT_PROMPT, /kya aap mujhe mere/i);
+  assert.doesNotMatch(OPENAI_TRANSCRIPT_PROMPT, /KYC status/i);
+  assert.doesNotMatch(OPENAI_TRANSCRIPT_PROMPT, /kya aap mujhe mere/i);
+  assert.doesNotMatch(OPENAI_TRANSCRIPT_PROMPT, /Roman-script/i);
 });
 
 test('transcribeOpenAIAudio removes leaked prompt example prefix from transcript', async () => {

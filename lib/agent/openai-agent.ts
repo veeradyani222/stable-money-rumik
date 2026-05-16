@@ -1,4 +1,4 @@
-import type { PersonaSeed } from '@/lib/personas';
+﻿import type { PersonaSeed } from '@/lib/personas';
 import {
   executeStableToolWithContext,
   getStableToolAuthTier,
@@ -31,7 +31,8 @@ export interface BuildOpenAIResponseRequestInput {
     createSupportTicket?: StableToolExecutionContext['createSupportTicket'];
     sendSecureLink?: StableToolExecutionContext['sendSecureLink'];
     verifiedMobileLast4?: string | null;
-    onReadAccessMobileStepVerified?: StableToolExecutionContext['onReadAccessMobileStepVerified'];
+    pendingRoute?: StableIntentRoute | null;
+    onReadAccessMobileStepVerified?: (lastFour: string, pendingRoute?: StableIntentRoute) => void | Promise<void>;
   };
   skipAiDobVerification?: boolean;
   skipAiMobileVerification?: boolean;
@@ -227,12 +228,14 @@ function isSupportTicketIssueAnswer(history: AgentHistoryMessage[]): boolean {
 }
 
 function inferRouteFromLocalContext(input: BuildOpenAIResponseRequestInput): StableIntentRoute {
-  const bundle = [...input.history.map((m) => m.text), input.transcript].join('\n');
-  const lower = bundle.toLowerCase();
+  const lower = input.transcript.toLowerCase();
   const t = input.transcript.trim();
 
   if (/\bwhat is kyc\b|\bkyc ka matlab\b/i.test(t)) {
     return { intent: 'kyc.explainer', ...getStableIntentPolicy('kyc.explainer') };
+  }
+  if (/payment history|payment summary|my payments|mere payments|meri payments|payments|पेमेंट्स|पेमेंट|পেমেন্ট|ادائیگی/i.test(lower)) {
+    return { intent: 'payment.summary', ...getStableIntentPolicy('payment.summary') };
   }
   if (/payment status|reconciliation|money debited|payment debit|refund|utr|reconciliation/i.test(lower)) {
     return { intent: 'payment.failed', ...getStableIntentPolicy('payment.failed') };
@@ -243,9 +246,6 @@ function inferRouteFromLocalContext(input: BuildOpenAIResponseRequestInput): Sta
   if (/(fd|fixed deposit)/i.test(lower) && /status|booking|bana|issue|confirm/i.test(lower)) {
     return { intent: 'fd.book.status', ...getStableIntentPolicy('fd.book.status') };
   }
-  if (/\d{4}-\d{2}-\d{2}/.test(t) || /\d{1,2}\s+\w+\s+\d{4}/i.test(t)) {
-    return { intent: 'kyc.status', ...getStableIntentPolicy('kyc.status') };
-  }
   return defaultRoute();
 }
 
@@ -253,6 +253,9 @@ async function resolveRouteForAgent(input: BuildOpenAIResponseRequestInput): Pro
   if (input.route) return input.route;
   if (isSupportTicketIssueAnswer(input.history)) {
     return { intent: 'grievance.escalate', ...getStableIntentPolicy('grievance.escalate') };
+  }
+  if (input.toolContext?.verifiedMobileLast4 && input.toolContext.pendingRoute) {
+    return input.toolContext.pendingRoute;
   }
   const apiKey = process.env.OPENAI_API_KEY;
   if (input.classifyUnknownIntent && apiKey) {
@@ -371,15 +374,12 @@ function buildTieredRouteInstructions(input: {
   if (route.authTier === 'Tier B' && !callVerified && !toolContext?.verifiedMobileLast4) {
     lines.push('Current turn is Tier B and caller is not verified.');
     lines.push('Do not use account tools until verify_read_access succeeds for this session.');
-    lines.push('Ask for the registered mobile number last four digits on this turn. Ask the caller to say the four digits in English, this is very important (e.g. "five five nine eight" or "5598").');
+    lines.push('Ask only for the registered mobile number last four digits on this turn. The caller may answer in any language or script; accept digits in any language or script and pass the answer verbatim to verify_read_access.');
     lines.push('Do not ask for date of birth in the same reply as the mobile last-four request.');
     lines.push('Ask for date of birth only after the mobile last-four step has matched.');
     lines.push('Never say DOB aloud; say date of birth in full words.');
     lines.push('Apni date of birth batayein in natural conversational Hinglish.');
     lines.push('Never ask for a specific date format, Y words, rigid separators, or digit-heavy templates.');
-    lines.push(
-      'If the caller says digits in a non-English language or script, politely ask them to repeat in English: "Kripya English mein digits bata dijiye, jaise five five nine eight."',
-    );
     lines.push(
       'When the caller answers, always call verify_read_access. Pass the caller\'s verbatim utterance as mobile_last_4 (or as date_of_birth in the DOB phase) if you cannot confidently decode the digits or date yourself. The server will semantically match it against the record.',
     );
@@ -411,7 +411,7 @@ function buildTieredRouteInstructions(input: {
 }
 
 function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, toolNames: string[]): string {
-  const route = merged.route ?? defaultRoute();
+  const route = merged.route ?? merged.toolContext?.pendingRoute ?? defaultRoute();
   const callVerified = merged.callVerified === true;
   const rumikBlurb = getRumikGuideBlurb();
 
@@ -431,6 +431,8 @@ function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, t
     'Voice output is synthesized by Rumik; keep wording speakable and telephony-safe.',
     'Do not ask the caller to read an OTP aloud.',
     'The verify_read_access tool may include internal fields such as mobile_step_verified; never read those field names aloud to the caller.',
+    'After verify_read_access returns mobile_step_verified true but verified false, naturally say mobile verification is complete and ask for date of birth.',
+    'After verify_read_access returns verified true, the final spoken answer must briefly mention both mobile verification and date of birth verification are complete before answering the original account request. Do not invent this; say it only from the tool result, and do not use a fixed template.',
     'For complaints, escalations, grievances, failed follow-ups, or raise-a-ticket requests, call create_support_ticket.',
     'If the caller only asks to create a support ticket but gives no issue context, ask what issue the ticket is for and do not call create_support_ticket yet.',
     'If the caller gives the ticket issue, briefly acknowledge before tool use: Main samajh gayi, main support ticket create kar deti hoon.',
@@ -483,7 +485,7 @@ function historyToOpenAiInputs(messages: AgentHistoryMessage[]): OpenAIInputMess
 }
 
 export function buildOpenAIResponseRequest(input: BuildOpenAIResponseRequestInput): OpenAIResponseRequest {
-  const route = input.route ?? defaultRoute();
+  const route = input.route ?? input.toolContext?.pendingRoute ?? defaultRoute();
   const toolNames = selectToolNamesForRequest({
     route,
     callVerified: input.callVerified === true,
@@ -824,7 +826,9 @@ function buildExecutionContext(
   return {
     callVerified: input.callVerified === true || verifiedRef.current,
     verifiedMobileLast4: input.toolContext?.verifiedMobileLast4 ?? undefined,
-    onReadAccessMobileStepVerified: input.toolContext?.onReadAccessMobileStepVerified,
+    onReadAccessMobileStepVerified: input.toolContext?.onReadAccessMobileStepVerified
+      ? (lastFour) => input.toolContext?.onReadAccessMobileStepVerified?.(lastFour, input.route)
+      : undefined,
     createSupportTicket: input.toolContext?.createSupportTicket,
     sendSecureLink: input.toolContext?.sendSecureLink,
     skipAiDobVerification: input.skipAiDobVerification === true || process.env.STABLE_DISABLE_AI_DOB === '1',
@@ -954,7 +958,7 @@ export async function runStableAgent(
     const rawArgs = parseToolArguments(fc.arguments);
     const mergedArgs = fc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, rawArgs) : rawArgs;
 
-    const execCtx = buildExecutionContext(input, verifiedRef);
+    const execCtx = buildExecutionContext(mergedBase, verifiedRef);
     const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
 
     toolCalls.push(fc.name);
@@ -1184,7 +1188,7 @@ export async function streamStableAgentText(
         verified: verifiedRef.current,
       } as { type: 'tool'; tool: string; phase: 'start';[k: string]: unknown });
 
-      const execCtx = buildExecutionContext(input, verifiedRef);
+      const execCtx = buildExecutionContext(mergedBase, verifiedRef);
       emitTiming('tool_execution_start', { tool: fc.name });
       const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
       emitTiming('tool_execution_end', { tool: fc.name, ok: toolResult.ok });
@@ -1270,7 +1274,7 @@ export async function streamStableAgentText(
               input.persona,
               nextFc.name,
               nextFc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, nextRawArgs) : nextRawArgs,
-              buildExecutionContext(input, verifiedRef),
+              buildExecutionContext(mergedBase, verifiedRef),
             );
             emitTiming('tool_execution_end', { tool: nextFc.name, ok: nextToolResult.ok });
 

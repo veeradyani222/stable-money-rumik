@@ -1,4 +1,4 @@
-import { matchCallerDobWithPersonaAi } from '@/lib/agent/dob-verification-ai';
+﻿import { matchCallerDobWithPersonaAi } from '@/lib/agent/dob-verification-ai';
 import { matchCallerMobileLastFourAi } from '@/lib/agent/mobile-verification-ai';
 import type { FixedDepositSeed, PaymentSeed, PersonaSeed } from '@/lib/personas';
 import {
@@ -56,7 +56,7 @@ export const stableToolDeclarations: StableToolDeclaration[] = [
     authTier: 'Tier B',
     parameters: {
       mobile_last_4:
-        'Last four digits of the registered mobile number as the caller said it (verbatim is fine, any language or script, e.g. "1123", "double one two three", "ek ek do teen", "ون ون ٹو تھری", "ڈبل ون ٹو تھری"). The server extracts the four digits semantically and falls back to strict digit parsing.',
+        'Last four digits of the registered mobile number as the caller said it (verbatim is fine, any language or script, e.g. "1123", "double one two three", "ek ek do teen", "ÙˆÙ† ÙˆÙ† Ù¹Ùˆ ØªÚ¾Ø±ÛŒ", "ÚˆØ¨Ù„ ÙˆÙ† Ù¹Ùˆ ØªÚ¾Ø±ÛŒ"). The server extracts the four digits semantically and falls back to strict digit parsing.',
       date_of_birth: {
         description:
           'Date of birth as the caller said or typed (verbatim is fine, any language or script). The server compares meaning to the verified account record when configured, and falls back to strict calendar parsing.',
@@ -219,7 +219,7 @@ function spokenStatus(value: string): string {
 
 function rumikSafeCopy(value: string): string {
   return value
-    .replaceAll('₹', 'rupees ')
+    .replaceAll('â‚¹', 'rupees ')
     .replace(/[;()[\]{}]/g, ',')
     .replace(/\s+/g, ' ')
     .trim();
@@ -317,7 +317,7 @@ function verifyReadAccessMobilePhase(
       kind: 'terminal',
       result: {
         ok: false,
-        summary: '[neutral] Account details check karne ke liye mobile number ke last four digits English mein batayein, jaise five five nine eight.',
+        summary: '[neutral] Account details check karne ke liye mobile number ke last four digits batayein.',
         data: {
           auth_tier: 'Tier B',
           verification_step: 'mobile_last_4_required',
@@ -332,7 +332,7 @@ function verifyReadAccessMobilePhase(
       kind: 'terminal',
       result: {
         ok: false,
-        summary: '[neutral] Mobile last four match nahi hua. Kripya English mein last four digits ek baar phir batayein.',
+        summary: '[neutral] Mobile last four match nahi hua. Kripya last four digits ek baar phir batayein.',
         data: {
           auth_tier: 'Tier B',
           verification_step: 'mobile_last_4_required',
@@ -382,7 +382,7 @@ function completeDobVerification(persona: PersonaSeed): StableToolResult {
 function dobMismatchResult(): StableToolResult {
   return {
     ok: false,
-    summary: '[neutral] Date of birth match nahi hua. Kripya English mein date of birth ek baar phir batayein, jaise nine November nineteen ninety five.',
+    summary: '[neutral] Date of birth match nahi hua. Kripya date of birth ek baar phir batayein, date, month aur year ke saath.',
     data: {
       auth_tier: 'Tier B',
       verification_step: 'dob_required',
@@ -395,7 +395,7 @@ function dobMismatchResult(): StableToolResult {
 function dobParseFailedResult(): StableToolResult {
   return {
     ok: false,
-    summary: '[neutral] Ek baar phir clearly English mein bata dijiye, date, month aur year.',
+    summary: '[neutral] Ek baar phir clearly bata dijiye, date, month aur year.',
     data: {
       auth_tier: 'Tier B',
       verification_step: 'dob_required',
@@ -413,7 +413,7 @@ function verifyReadAccess(
 ): StableToolResult {
   const phase = verifyReadAccessMobilePhase(persona, args, context);
   if (phase.kind === 'terminal') return phase.result;
-  // DOB reached but sync path cannot call AI — return dob_required so the
+  // DOB reached but sync path cannot call AI â€” return dob_required so the
   // async executeStableToolWithContext path handles it instead.
   return dobParseFailedResult();
 }
@@ -422,7 +422,7 @@ function verifyReadAccess(
  * Wrap the deterministic mobile phase with an AI-first extraction step so the
  * caller can speak the last four digits in any language or script (English,
  * Hindi, Hinglish, Urdu, Arabic script, Devanagari, "double one two three",
- * "ڈبل ون ٹو تھری", "ek ek do teen", etc.). Falls back to the original
+ * "ÚˆØ¨Ù„ ÙˆÙ† Ù¹Ùˆ ØªÚ¾Ø±ÛŒ", "ek ek do teen", etc.). Falls back to the original
  * deterministic phase when AI is disabled or the model cannot decide.
  */
 async function verifyReadAccessMobilePhaseAi(
@@ -433,13 +433,47 @@ async function verifyReadAccessMobilePhaseAi(
   const gateLast4 =
     typeof context.verifiedMobileLast4 === 'string' ? digitsOnly(context.verifiedMobileLast4).slice(-4) : '';
   const rawMobileArg = args.mobile_last_4 == null ? '' : String(args.mobile_last_4).trim();
+  const hasDobArg = typeof args.date_of_birth === 'string' && args.date_of_birth.trim().length > 0;
 
-  // Gate already matched — skip straight through.
+  console.log('[stable-mobile-verification:start]', {
+    customer_id: persona.customer_id,
+    record_last_four: persona.mobile_last_4,
+    raw_mobile_arg: rawMobileArg,
+    verified_mobile_gate: gateLast4 || null,
+    skip_ai_mobile: context.skipAiMobileVerification === true,
+    disable_ai_mobile_env: process.env.STABLE_DISABLE_AI_MOBILE === '1',
+    has_openai_key: Boolean(process.env.OPENAI_API_KEY?.trim()),
+  });
+
+  // Gate already matched - skip straight through.
+  if (gateLast4 === persona.mobile_last_4 && hasDobArg) {
+    console.log('[stable-mobile-verification:gate-skip-to-dob]', {
+      customer_id: persona.customer_id,
+      record_last_four: persona.mobile_last_4,
+      raw_mobile_arg: rawMobileArg,
+      verified_mobile_gate: gateLast4,
+    });
+    return verifyReadAccessMobilePhase(
+      persona,
+      { ...args, mobile_last_4: persona.mobile_last_4 },
+      context,
+    );
+  }
+
   if (!rawMobileArg && gateLast4 === persona.mobile_last_4) {
+    console.log('[stable-mobile-verification:gate-hit]', {
+      customer_id: persona.customer_id,
+      record_last_four: persona.mobile_last_4,
+      verified_mobile_gate: gateLast4,
+    });
     return verifyReadAccessMobilePhase(persona, args, context);
   }
 
   if (!rawMobileArg) {
+    console.warn('[stable-mobile-verification:missing-input]', {
+      customer_id: persona.customer_id,
+      record_last_four: persona.mobile_last_4,
+    });
     return verifyReadAccessMobilePhase(persona, args, context);
   }
 
@@ -450,6 +484,15 @@ async function verifyReadAccessMobilePhaseAi(
     Boolean(apiKey);
 
   if (!useAi) {
+    console.warn('[stable-mobile-verification:ai-disabled-fallback]', {
+      customer_id: persona.customer_id,
+      raw_mobile_arg: rawMobileArg,
+      digits_fallback_last_four: digitsOnly(args.mobile_last_4).slice(-4),
+      record_last_four: persona.mobile_last_4,
+      skip_ai_mobile: context.skipAiMobileVerification === true,
+      disable_ai_mobile_env: process.env.STABLE_DISABLE_AI_MOBILE === '1',
+      has_openai_key: Boolean(apiKey),
+    });
     return verifyReadAccessMobilePhase(persona, args, context);
   }
 
@@ -460,7 +503,21 @@ async function verifyReadAccessMobilePhaseAi(
     fetcher: context.fetcher,
   });
 
+  console.log('[stable-mobile-verification:ai-result]', {
+    customer_id: persona.customer_id,
+    raw_mobile_arg: rawMobileArg,
+    record_last_four: persona.mobile_last_4,
+    verdict: ai.verdict,
+    extracted_last_four: ai.extractedLastFour,
+    model_answered: ai.modelAnswered,
+  });
+
   if (ai.verdict === 'match') {
+    console.log('[stable-mobile-verification:matched]', {
+      customer_id: persona.customer_id,
+      raw_mobile_arg: rawMobileArg,
+      record_last_four: persona.mobile_last_4,
+    });
     return verifyReadAccessMobilePhase(
       persona,
       { ...args, mobile_last_4: persona.mobile_last_4 },
@@ -471,6 +528,11 @@ async function verifyReadAccessMobilePhaseAi(
   if (ai.verdict === 'unclear' && apiKey === 'test-openai-key') {
     const mobileStr = String(rawMobileArg || args.mobile_last_4 || '');
     if (mobileStr.includes(persona.mobile_last_4)) {
+      console.warn('[stable-mobile-verification:test-key-unclear-match-fallback]', {
+        customer_id: persona.customer_id,
+        raw_mobile_arg: rawMobileArg,
+        record_last_four: persona.mobile_last_4,
+      });
       return verifyReadAccessMobilePhase(
         persona,
         { ...args, mobile_last_4: persona.mobile_last_4 },
@@ -479,14 +541,22 @@ async function verifyReadAccessMobilePhaseAi(
     }
   }
 
-  // AI says no_match or unclear — return directly, no deterministic fallback.
+  // AI says no_match or unclear - return directly, no deterministic fallback.
+  console.warn('[stable-mobile-verification:rejected]', {
+    customer_id: persona.customer_id,
+    raw_mobile_arg: rawMobileArg,
+    record_last_four: persona.mobile_last_4,
+    verdict: ai.verdict,
+    extracted_last_four: ai.extractedLastFour,
+    model_answered: ai.modelAnswered,
+  });
   return {
     kind: 'terminal',
     result: {
       ok: false,
       summary: ai.verdict === 'no_match'
-        ? '[neutral] Mobile last four match nahi hua. Kripya English mein last four digits ek baar phir batayein.'
-        : '[neutral] Samajh nahi aa paya. Kripya English mein last four digits ek baar phir clearly batayein.',
+        ? '[neutral] Mobile last four match nahi hua. Kripya last four digits ek baar phir batayein.'
+        : '[neutral] Samajh nahi aa paya. Kripya last four digits ek baar phir clearly batayein.',
       data: {
         auth_tier: 'Tier B',
         verification_step: 'mobile_last_4_required',
@@ -508,16 +578,41 @@ async function verifyReadAccessWithAi(
   const raw = phase.raw;
   const apiKey = process.env.OPENAI_API_KEY?.trim();
 
+  console.log('[stable-dob-verification:start]', {
+    customer_id: persona.customer_id,
+    record_date_iso: persona.date_of_birth,
+    raw_date_of_birth: raw,
+    verified_mobile_gate: context.verifiedMobileLast4 ?? null,
+    skip_ai_dob: context.skipAiDobVerification === true,
+    has_openai_key: Boolean(apiKey),
+  });
+
   if (!apiKey || context.skipAiDobVerification) {
     if (context.skipAiDobVerification) {
       const dobStr = String(raw || args.date_of_birth || '');
       if (dobStr && persona.date_of_birth && dobStr.includes(persona.date_of_birth.substring(0, 4))) {
+        console.log('[stable-dob-verification:skip-ai-match]', {
+          customer_id: persona.customer_id,
+          raw_date_of_birth: raw,
+          record_date_iso: persona.date_of_birth,
+        });
         return completeDobVerification(persona);
       } else if (dobStr) {
+        console.warn('[stable-dob-verification:skip-ai-mismatch]', {
+          customer_id: persona.customer_id,
+          raw_date_of_birth: raw,
+          record_date_iso: persona.date_of_birth,
+        });
         return dobMismatchResult();
       }
     }
-    // No API key — cannot verify DOB at all.
+    // No API key - cannot verify DOB at all.
+    console.warn('[stable-dob-verification:parse-failed]', {
+      customer_id: persona.customer_id,
+      raw_date_of_birth: raw,
+      record_date_iso: persona.date_of_birth,
+      reason: apiKey ? 'skip_ai_without_parse_match' : 'missing_openai_api_key',
+    });
     return dobParseFailedResult();
   }
 
@@ -528,27 +623,62 @@ async function verifyReadAccessWithAi(
     fetcher: context.fetcher,
   });
 
+  console.log('[stable-dob-verification:ai-result]', {
+    customer_id: persona.customer_id,
+    raw_date_of_birth: raw,
+    record_date_iso: persona.date_of_birth,
+    verdict: ai.verdict,
+    model_answered: ai.modelAnswered,
+  });
+
   if (!ai.modelAnswered) {
     if (process.env.NODE_ENV === 'test' || apiKey === 'test-openai-key') {
       const dobStr = String(raw || args.date_of_birth || '');
       if (dobStr && persona.date_of_birth && dobStr.includes(persona.date_of_birth.substring(0, 4))) {
+        console.warn('[stable-dob-verification:test-key-no-answer-match-fallback]', {
+          customer_id: persona.customer_id,
+          raw_date_of_birth: raw,
+          record_date_iso: persona.date_of_birth,
+        });
         return completeDobVerification(persona);
       } else if (dobStr) {
+        console.warn('[stable-dob-verification:test-key-no-answer-mismatch-fallback]', {
+          customer_id: persona.customer_id,
+          raw_date_of_birth: raw,
+          record_date_iso: persona.date_of_birth,
+        });
         return dobMismatchResult();
       }
     }
-    // AI couldn't respond — ask the caller to repeat instead of crashing.
+    // AI couldn't respond - ask the caller to repeat instead of crashing.
+    console.warn('[stable-dob-verification:parse-failed]', {
+      customer_id: persona.customer_id,
+      raw_date_of_birth: raw,
+      record_date_iso: persona.date_of_birth,
+      reason: 'model_did_not_answer',
+    });
     return dobParseFailedResult();
   }
 
   if (ai.verdict === 'match') {
+    console.log('[stable-dob-verification:matched]', {
+      customer_id: persona.customer_id,
+      raw_date_of_birth: raw,
+      record_date_iso: persona.date_of_birth,
+    });
     return completeDobVerification(persona);
   }
 
+  console.warn('[stable-dob-verification:rejected]', {
+    customer_id: persona.customer_id,
+    raw_date_of_birth: raw,
+    record_date_iso: persona.date_of_birth,
+    verdict: ai.verdict,
+  });
   return dobMismatchResult();
 }
 
-/** Legacy DOB tool — routes through AI verification like everything else. */
+/** Legacy DOB tool â€” routes through AI verification like everything else. */
 async function legacyDobVerification(persona: PersonaSeed, args: Record<string, unknown>): Promise<StableToolResult> {
   const raw = typeof args.date_of_birth === 'string' ? args.date_of_birth.trim() : '';
   if (!raw) return dobParseFailedResult();
@@ -1112,3 +1242,5 @@ export async function executeStableToolWithContext(
 
   return result;
 }
+
+
