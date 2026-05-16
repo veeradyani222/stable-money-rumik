@@ -254,7 +254,7 @@ test('agent call client stops static opening audio during assistant stop paths',
   assert.ok(finishIndex < clearIndex);
 });
 
-test('agent call client does not barge in on raw server VAD while the static opener is playing', () => {
+test('agent call client ignores raw server VAD while the static opener is playing', () => {
   const helperIndex = clientSource.indexOf('function shouldBargeInOnRealtimeSpeechStart');
   const staticGuardIndex = clientSource.indexOf('if (input.staticOpeningPlaying) return false;', helperIndex);
   const speechStartedIndex = clientSource.indexOf("realtimeEvent.type === 'input_audio_buffer.speech_started'");
@@ -268,6 +268,30 @@ test('agent call client does not barge in on raw server VAD while the static ope
   assert.notEqual(staticInputIndex, -1);
   assert.ok(helperIndex < speechStartedIndex);
   assert.ok(speechStartedIndex < shouldBargeIndex);
+});
+
+test('agent call client uses local mic energy to stop the static opener at speech start', () => {
+  const calibrationIndex = clientSource.indexOf('const STATIC_OPENING_ECHO_CALIBRATION_MS = 900;');
+  const sampleMsIndex = clientSource.indexOf('const STATIC_OPENING_BARGE_IN_SAMPLE_MS = 60;');
+  const helperIndex = clientSource.indexOf('function shouldStopStaticOpeningForMicRms');
+  const timerRefIndex = clientSource.indexOf('const staticOpeningBargeInTimerRef = useRef<number | null>(null);');
+  const echoRefIndex = clientSource.indexOf('const staticOpeningEchoFloorRef = useRef(0);');
+  const intervalIndex = clientSource.indexOf('staticOpeningBargeInTimerRef.current = window.setInterval');
+  const analyserIndex = clientSource.indexOf('analyser.getFloatTimeDomainData(data);', intervalIndex);
+  const decisionIndex = clientSource.indexOf('shouldStopStaticOpeningForMicRms({', analyserIndex);
+  const bargeIndex = clientSource.indexOf("performRealtimeBargeIn('static-opening-local-vad')", decisionIndex);
+
+  assert.notEqual(calibrationIndex, -1);
+  assert.notEqual(sampleMsIndex, -1);
+  assert.notEqual(helperIndex, -1);
+  assert.notEqual(timerRefIndex, -1);
+  assert.notEqual(echoRefIndex, -1);
+  assert.notEqual(intervalIndex, -1);
+  assert.notEqual(analyserIndex, -1);
+  assert.notEqual(decisionIndex, -1);
+  assert.notEqual(bargeIndex, -1);
+  assert.ok(helperIndex < intervalIndex);
+  assert.ok(intervalIndex < bargeIndex);
 });
 
 test('agent call client filters static opener echo before accepting realtime transcript interruptions', () => {
@@ -370,6 +394,28 @@ test('agent call client exposes an accessible mobile persona drawer handle and o
   assert.match(clientSource, /setIsPersonaPanelOpen\(false\)/);
   assert.doesNotMatch(clientSource, /className="mobile-panel-toggle"/);
   assert.doesNotMatch(clientSource, /className="mobile-panel-close"/);
+});
+
+test('agent call client offers persona switching from the side panel and reloads the active call', () => {
+  assert.match(clientSource, /import \{ PERSONAS \} from '@\/lib\/personas';/);
+  assert.match(clientSource, /import \{ PersonaDetailModal \} from '@\/components\/onboarding\/PersonaDetailModal';/);
+  assert.match(clientSource, /type PanelTab = 'persona' \| 'questions' \| 'changePersona';/);
+  assert.match(clientSource, /const \[personaChangeError, setPersonaChangeError\] = useState\(''\);/);
+  assert.match(clientSource, /const \[personaChangeSubmittingId, setPersonaChangeSubmittingId\] = useState<string \| null>\(null\);/);
+  assert.match(clientSource, /const \[detailPersona, setDetailPersona\] = useState<PersonaSeed \| null>\(null\);/);
+  assert.match(clientSource, /fetch\('\/api\/onboarding\/select-persona'/);
+  assert.match(clientSource, /body: JSON\.stringify\(\{ session_id: session\.session_id, persona_id: personaId \}\)/);
+  assert.match(clientSource, /window\.location\.assign\(`\/agent\?session_id=\$\{encodeURIComponent\(session\.session_id\)\}`\)/);
+  assert.match(clientSource, /activeTab === 'changePersona'/);
+  assert.match(clientSource, /Change persona/);
+  assert.match(clientSource, /PERSONAS\.map\(\(persona\) =>/);
+  assert.match(clientSource, /className=\{`persona-card persona-change-card/);
+  assert.match(clientSource, /className="persona-card__body"/);
+  assert.match(clientSource, /className="persona-card__name"/);
+  assert.match(clientSource, /className="persona-card__details-btn"/);
+  assert.match(clientSource, /onClick=\{\(\) => setDetailPersona\(persona\)\}/);
+  assert.match(clientSource, /<PersonaDetailModal/);
+  assert.match(clientSource, /await changePersona\(id\);/);
 });
 
 test('agent call client starts a fresh microphone recorder after confirmed speech', () => {

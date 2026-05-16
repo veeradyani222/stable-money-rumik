@@ -7,6 +7,8 @@ import type { PersonaSuggestion, PersonaBrief } from '@/lib/agent/persona-sugges
 import { buildPersonaDetailSections } from '@/lib/agent/persona-panel';
 import { STABLE_DEFAULT_OPENING } from '@/lib/agent/stable-call-copy';
 import type { PersonaSeed } from '@/lib/personas';
+import { PERSONAS } from '@/lib/personas';
+import { PersonaDetailModal } from '@/components/onboarding/PersonaDetailModal';
 import { AgentAudioVisualizerBar, type AgentVisualizerSpeaker } from '@/components/agents-ui/agent-audio-visualizer-bar';
 import {
   shouldSendMicrophoneAudio,
@@ -18,7 +20,7 @@ import { createRumikChunkBuffer, flushRumikChunkBuffer, pushRumikTextDelta } fro
 import { normalizeRumikText } from '@/lib/voice/rumik-text';
 
 type CallState = VoiceCallState;
-type PanelTab = 'persona' | 'questions';
+type PanelTab = 'persona' | 'questions' | 'changePersona';
 type HistoryMessage = { role: 'user' | 'model'; text: string };
 type TranscriptLine = { role: 'user' | 'agent' | 'system'; text: string };
 
@@ -102,6 +104,12 @@ const AGENT_CLIENT_HISTORY_LIMIT = 16;
 const INCOMING_RINGTONE_SRC = '/assets/ringtone.mp3';
 const OUTGOING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
 const STATIC_RUMIK_OPENING_SRC = '/assets/audio/rumik-opening.wav';
+const STATIC_OPENING_ECHO_CALIBRATION_MS = 900;
+const STATIC_OPENING_BARGE_IN_SAMPLE_MS = 60;
+const STATIC_OPENING_BARGE_IN_REQUIRED_FRAMES = 2;
+const STATIC_OPENING_BARGE_IN_MIN_RMS = 0.04;
+const STATIC_OPENING_ECHO_DELTA_RMS = 0.022;
+const STATIC_OPENING_ECHO_MULTIPLIER = 2.4;
 
 const openingAudioCache: OpeningAudioCache = {
   status: 'idle',
@@ -293,6 +301,33 @@ function shouldBargeInOnRealtimeSpeechStart(input: {
 }): boolean {
   if (input.staticOpeningPlaying) return false;
   return input.responding || input.callState === 'thinking' || input.callState === 'speaking';
+}
+
+function getFloatTimeDomainRms(data: Float32Array<ArrayBuffer>): number {
+  let sum = 0;
+  for (let index = 0; index < data.length; index += 1) {
+    sum += data[index] * data[index];
+  }
+  return Math.sqrt(sum / data.length);
+}
+
+function getStaticOpeningBargeInThreshold(echoFloor: number): number {
+  return Math.max(
+    STATIC_OPENING_BARGE_IN_MIN_RMS,
+    echoFloor + STATIC_OPENING_ECHO_DELTA_RMS,
+    echoFloor * STATIC_OPENING_ECHO_MULTIPLIER,
+  );
+}
+
+function shouldStopStaticOpeningForMicRms(input: {
+  rms: number;
+  echoFloor: number;
+  openingAgeMs: number;
+  speechFrameCount: number;
+}): boolean {
+  if (input.openingAgeMs < STATIC_OPENING_ECHO_CALIBRATION_MS) return false;
+  if (input.speechFrameCount < STATIC_OPENING_BARGE_IN_REQUIRED_FRAMES) return false;
+  return input.rms >= getStaticOpeningBargeInThreshold(input.echoFloor);
 }
 
 function parseAgentStreamBlock(block: string): AgentStreamMessage | null {
@@ -686,6 +721,9 @@ export function AgentCallClient() {
   const [voiceAnalyser, setVoiceAnalyser] = useState<AnalyserNode | null>(null);
   const [agentSidebarWidthPx, setAgentSidebarWidthPx] = useState(AGENT_SIDEBAR_WIDTH_DEFAULT);
   const [isPersonaPanelOpen, setIsPersonaPanelOpen] = useState(false);
+  const [personaChangeError, setPersonaChangeError] = useState('');
+  const [personaChangeSubmittingId, setPersonaChangeSubmittingId] = useState<string | null>(null);
+  const [detailPersona, setDetailPersona] = useState<PersonaSeed | null>(null);
   const agentSidebarResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -711,6 +749,9 @@ export function AgentCallClient() {
   const rumikPlaybackIdRef = useRef(0);
   const staticOpeningAudioRef = useRef<HTMLAudioElement | null>(null);
   const staticOpeningFinishRef = useRef<(() => void) | null>(null);
+  const staticOpeningStartedAtRef = useRef(0);
+  const staticOpeningBargeInTimerRef = useRef<number | null>(null);
+  const staticOpeningEchoFloorRef = useRef(0);
   const audioContextRef = useRef<AudioContext | null>(null);
   const scheduledAtRef = useRef(0);
   const sourcesRef = useRef<AudioBufferSourceNode[]>([]);
@@ -976,6 +1017,12 @@ export function AgentCallClient() {
     staticOpeningFinishRef.current?.();
     staticOpeningFinishRef.current = null;
     staticOpeningAudioRef.current = null;
+    staticOpeningStartedAtRef.current = 0;
+    staticOpeningEchoFloorRef.current = 0;
+    if (staticOpeningBargeInTimerRef.current) {
+      window.clearInterval(staticOpeningBargeInTimerRef.current);
+      staticOpeningBargeInTimerRef.current = null;
+    }
     rumikSpeakingRef.current = false;
     pendingRumikRequestsRef.current = 0;
     pendingRumikSourcesRef.current = 0;
@@ -1560,9 +1607,18 @@ export function AgentCallClient() {
     rumikSpeakingRef.current = true;
 
     const finished = new Promise<boolean>((resolve) => {
+      let localSpeechFrameCount = 0;
+      const stopStaticOpeningBargeInMonitor = () => {
+        if (!staticOpeningBargeInTimerRef.current) return;
+        window.clearInterval(staticOpeningBargeInTimerRef.current);
+        staticOpeningBargeInTimerRef.current = null;
+      };
       const cleanup = (played: boolean) => {
         if (staticOpeningAudioRef.current === audio) staticOpeningAudioRef.current = null;
         if (staticOpeningFinishRef.current === finishInterruptedPlayback) staticOpeningFinishRef.current = null;
+        staticOpeningStartedAtRef.current = 0;
+        staticOpeningEchoFloorRef.current = 0;
+        stopStaticOpeningBargeInMonitor();
         rumikSpeakingRef.current = false;
         if (playbackId === rumikPlaybackIdRef.current && !isInactiveCallState(callStateRef.current)) {
           callStateRef.current = 'connected';
@@ -1575,13 +1631,65 @@ export function AgentCallClient() {
       audio.onended = () => cleanup(true);
       audio.onerror = () => cleanup(false);
       staticOpeningFinishRef.current = finishInterruptedPlayback;
+
+      staticOpeningBargeInTimerRef.current = window.setInterval(() => {
+        if (staticOpeningAudioRef.current !== audio || playbackId !== rumikPlaybackIdRef.current) {
+          stopStaticOpeningBargeInMonitor();
+          return;
+        }
+
+        const analyser = analyserRef.current;
+        const data = analyserDataRef.current;
+        if (staticOpeningStartedAtRef.current <= 0) return;
+        if (!analyser || !data || mutedRef.current) return;
+
+        analyser.getFloatTimeDomainData(data);
+        const rms = getFloatTimeDomainRms(data);
+        latestMicRmsRef.current = rms;
+        const openingAgeMs = performance.now() - staticOpeningStartedAtRef.current;
+
+        if (openingAgeMs < STATIC_OPENING_ECHO_CALIBRATION_MS) {
+          const previousFloor = staticOpeningEchoFloorRef.current;
+          staticOpeningEchoFloorRef.current = previousFloor <= 0 ? rms : previousFloor * 0.85 + rms * 0.15;
+          localSpeechFrameCount = 0;
+          return;
+        }
+
+        const echoFloor = staticOpeningEchoFloorRef.current;
+        const threshold = getStaticOpeningBargeInThreshold(echoFloor);
+        localSpeechFrameCount = rms >= threshold ? localSpeechFrameCount + 1 : 0;
+
+        if (
+          shouldStopStaticOpeningForMicRms({
+            rms,
+            echoFloor,
+            openingAgeMs,
+            speechFrameCount: localSpeechFrameCount,
+          })
+        ) {
+          logVoiceDebug('rumik:opening-static:local-barge-in', {
+            rms: Number(rms.toFixed(5)),
+            echoFloor: Number(echoFloor.toFixed(5)),
+            threshold: Number(threshold.toFixed(5)),
+            speechFrameCount: localSpeechFrameCount,
+          });
+          performRealtimeBargeIn('static-opening-local-vad');
+        }
+      }, STATIC_OPENING_BARGE_IN_SAMPLE_MS);
     });
 
     try {
       await audio.play();
+      staticOpeningStartedAtRef.current = performance.now();
     } catch (playError) {
       if (staticOpeningAudioRef.current === audio) staticOpeningAudioRef.current = null;
       if (staticOpeningFinishRef.current) staticOpeningFinishRef.current = null;
+      staticOpeningStartedAtRef.current = 0;
+      staticOpeningEchoFloorRef.current = 0;
+      if (staticOpeningBargeInTimerRef.current) {
+        window.clearInterval(staticOpeningBargeInTimerRef.current);
+        staticOpeningBargeInTimerRef.current = null;
+      }
       rumikSpeakingRef.current = false;
       logVoiceDebug('rumik:opening-static:play-failed', {
         src: STATIC_RUMIK_OPENING_SRC,
@@ -1593,7 +1701,7 @@ export function AgentCallClient() {
     const played = await finished;
     if (!played) logVoiceDebug('rumik:opening-static:error', { src: STATIC_RUMIK_OPENING_SRC });
     return played;
-  }, [stopRumikAudio]);
+  }, [performRealtimeBargeIn, stopRumikAudio]);
 
   const playOpeningAudio = useCallback(async () => {
     if (isInactiveCallState(callStateRef.current)) return;
@@ -1848,6 +1956,39 @@ export function AgentCallClient() {
       waitForRumikPlaybackTurn,
       warmRumikSocket,
     ],
+  );
+
+  const changePersona = useCallback(
+    async (personaId: string) => {
+      if (!session || personaChangeSubmittingId) return;
+
+      setPersonaChangeError('');
+      setPersonaChangeSubmittingId(personaId);
+      try {
+        const response = await fetch('/api/onboarding/select-persona', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: session.session_id, persona_id: personaId }),
+        });
+        const data: unknown = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message =
+            typeof data === 'object' && data && 'error' in data && typeof (data as { error: unknown }).error === 'string'
+              ? (data as { error: string }).error
+              : 'Could not change persona.';
+          setPersonaChangeError(message);
+          return;
+        }
+
+        endCall();
+        window.location.assign(`/agent?session_id=${encodeURIComponent(session.session_id)}`);
+      } catch {
+        setPersonaChangeError('Network error. Check your connection and try again.');
+      } finally {
+        setPersonaChangeSubmittingId(null);
+      }
+    },
+    [endCall, personaChangeSubmittingId, session],
   );
 
   useEffect(() => () => endCall(), [endCall]);
@@ -2408,7 +2549,14 @@ export function AgentCallClient() {
             className={activeTab === 'questions' ? 'panel-tab panel-tab--active' : 'panel-tab'}
             onClick={() => setActiveTab('questions')}
           >
-            Questions
+            Ask
+          </button>
+          <button
+            type="button"
+            className={activeTab === 'changePersona' ? 'panel-tab panel-tab--active' : 'panel-tab'}
+            onClick={() => setActiveTab('changePersona')}
+          >
+            Change
           </button>
         </div>
 
@@ -2448,7 +2596,7 @@ export function AgentCallClient() {
               ))}
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'questions' ? (
           <div className="panel-section">
             <h2>Try asking</h2>
             <p className="suggestion-panel-intro">
@@ -2477,6 +2625,39 @@ export function AgentCallClient() {
               ))}
             </div>
           </div>
+        ) : (
+          <div className="panel-section">
+            <h2>Change persona</h2>
+            <p className="persona-change-intro">Pick any demo customer. The call page will reload with that persona.</p>
+            <div className="persona-change-grid">
+              {PERSONAS.map((persona) => {
+                const isCurrent = session.persona.persona_id === persona.persona_id;
+                const isSubmitting = personaChangeSubmittingId === persona.persona_id;
+                return (
+                  <div
+                    key={persona.persona_id}
+                    className={`persona-card persona-change-card ${isCurrent ? 'persona-card--selected persona-change-card--current' : ''}`}
+                  >
+                    <div className="persona-card__body">
+                      <h3 className="persona-card__name">{persona.name}</h3>
+                      <button
+                        type="button"
+                        className="persona-card__details-btn"
+                        onClick={() => setDetailPersona(persona)}
+                        disabled={Boolean(personaChangeSubmittingId)}
+                      >
+                        View details
+                      </button>
+                      <span className="persona-change-card-status">
+                        {isSubmitting ? 'Changing...' : isCurrent ? 'Current persona' : 'Choose from details'}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {personaChangeError ? <p className="persona-change-error">{personaChangeError}</p> : null}
+          </div>
         )}
 
         <div className="transcript-strip">
@@ -2487,6 +2668,14 @@ export function AgentCallClient() {
           ))}
         </div>
       </aside>
+      <PersonaDetailModal
+        persona={detailPersona}
+        onClose={() => setDetailPersona(null)}
+        onChoose={async (id) => {
+          setDetailPersona(null);
+          await changePersona(id);
+        }}
+      />
     </main>
   );
 }

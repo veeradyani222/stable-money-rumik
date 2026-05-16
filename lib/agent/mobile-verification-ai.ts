@@ -103,9 +103,9 @@ function parseMobileVerdict(text: string): { verdict: MobileAiVerdict; extracted
     const parsed = JSON.parse(trimmed) as { verdict?: unknown; extracted_last_four?: unknown };
     const v = parsed.verdict;
     if (v !== 'match' && v !== 'no_match' && v !== 'unclear') return null;
-    const extractedRaw = typeof parsed.extracted_last_four === 'string' ? parsed.extracted_last_four : '';
-    const extracted = /^\d{4}$/.test(extractedRaw) ? extractedRaw : null;
-    return { verdict: v, extractedLastFour: extracted };
+    const raw = typeof parsed.extracted_last_four === 'string' ? parsed.extracted_last_four.replace(/\D/g, '') : '';
+    const extractedLastFour = /^\d{4}$/.test(raw) ? raw : null;
+    return { verdict: v, extractedLastFour };
   } catch {
     return null;
   }
@@ -140,14 +140,13 @@ export async function matchCallerMobileLastFourAi(input: MobileAiMatchInput): Pr
     instructions: [
       'You verify whether a banking support caller stated the last four digits of their registered mobile number.',
       'record_last_four is the canonical four digit string on file (positional, order matters; e.g. "1123" ≠ "2311").',
-      'The caller may speak in English, Hindi, Hinglish, Urdu, Arabic script, Devanagari, or any other language, and may use spoken patterns such as "double one two three", "triple seven five", "ek do teen char", "ون ون ٹو تھری", "ڈبل ون ٹو تھری", or simply the digits "1123".',
-      'Map digit words (zero through nine) in any language to digits. Examples: "double X" -> X X. "triple X" -> X X X. "ek/एक" -> 1, "do/दो" -> 2, "teen/तीन" -> 3, "char/चार" -> 4. Urdu: "صفر"=0, "ون/ایک"=1, "ٹو/دو"=2, "تھری/تین"=3, "فور/چار"=4, "فائیو/پانچ"=5, "سکس/چھ"=6, "سیون/سات"=7, "ایٹ/آٹھ"=8, "نائن/نو"=9, "ڈبل"=double, "ٹرپل"=triple.',
-      'Ignore politeness fillers, "hai", "the digits are", "last four", "is", "are", "yes", "ok", scope words, and other non-digit content.',
-      'If the utterance yields exactly four digits in sequence, return extracted_last_four with those four digits. Compare to record_last_four positionally.',
+      'The caller may speak in ANY language, script, or writing system worldwide. Common Indian languages and scripts include English, Hindi, Hinglish, Urdu, Bengali (বাংলা, e.g. পাঁচ=5 ছয়=6 সাত=7 আট=8 নয়=9), Tamil (தமிழ்), Telugu (తెలుగు), Kannada (ಕನ್ನಡ), Malayalam (മലയാളം), Marathi, Gujarati, Punjabi (ਪੰਜਾਬੀ), Arabic script, Devanagari, Gurmukhi, and more.',
+      'Handle phonetic ASR transcriptions, number words in any language, and creative phrasing like "double", "triple", "ek do teen char", "পাঁচ পাঁচ নয় আট", "ڈبل ون ٹو تھری", etc. Use your intelligence to decode what four digits the caller intended.',
       'verdict=match when the caller clearly conveys all four digits in the same order as record_last_four.',
-      'verdict=no_match when the caller clearly conveys four different digits.',
-      'verdict=unclear when fewer than four digits can be extracted, when more than four digits appear without a clear "last four" of them, when the utterance has no digit content, or when it is gibberish.',
-      'Do not guess. If you are not confident the caller said four specific digits, return unclear with extracted_last_four="".',
+      'verdict=no_match when the caller clearly conveys four digits that differ from record_last_four.',
+      'verdict=unclear when the utterance has no digit content, is gibberish, or you cannot confidently determine all four digits.',
+      'If you can determine the four digits the caller intended, return them as a four-digit string in extracted_last_four. Otherwise return an empty string for extracted_last_four.',
+      'Do not guess. If you are not confident, return unclear.',
     ].join('\n'),
     max_output_tokens: 4000,
     stream: false,

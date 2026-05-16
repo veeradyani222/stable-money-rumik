@@ -317,7 +317,7 @@ function verifyReadAccessMobilePhase(
       kind: 'terminal',
       result: {
         ok: false,
-        summary: '[neutral] Account details check karne ke liye mobile number ke last four digits batayein.',
+        summary: '[neutral] Account details check karne ke liye mobile number ke last four digits English mein batayein, jaise five five nine eight.',
         data: {
           auth_tier: 'Tier B',
           verification_step: 'mobile_last_4_required',
@@ -332,7 +332,7 @@ function verifyReadAccessMobilePhase(
       kind: 'terminal',
       result: {
         ok: false,
-        summary: '[neutral] Mobile last four match nahi hua. Kripya last four digits ek baar phir batayein.',
+        summary: '[neutral] Mobile last four match nahi hua. Kripya English mein last four digits ek baar phir batayein.',
         data: {
           auth_tier: 'Tier B',
           verification_step: 'mobile_last_4_required',
@@ -382,7 +382,7 @@ function completeDobVerification(persona: PersonaSeed): StableToolResult {
 function dobMismatchResult(): StableToolResult {
   return {
     ok: false,
-    summary: '[neutral] Date of birth match nahi hua. Ek baar phir date of birth batayein.',
+    summary: '[neutral] Date of birth match nahi hua. Kripya English mein date of birth ek baar phir batayein, jaise nine November nineteen ninety five.',
     data: {
       auth_tier: 'Tier B',
       verification_step: 'dob_required',
@@ -395,7 +395,7 @@ function dobMismatchResult(): StableToolResult {
 function dobParseFailedResult(): StableToolResult {
   return {
     ok: false,
-    summary: '[neutral] Ek baar phir clearly bata dijiye, date, month aur year.',
+    summary: '[neutral] Ek baar phir clearly English mein bata dijiye, date, month aur year.',
     data: {
       auth_tier: 'Tier B',
       verification_step: 'dob_required',
@@ -433,12 +433,8 @@ async function verifyReadAccessMobilePhaseAi(
   const gateLast4 =
     typeof context.verifiedMobileLast4 === 'string' ? digitsOnly(context.verifiedMobileLast4).slice(-4) : '';
   const rawMobileArg = args.mobile_last_4 == null ? '' : String(args.mobile_last_4).trim();
-  const directDigits = digitsOnly(rawMobileArg).slice(-4);
 
-  if (rawMobileArg && directDigits.length === 4) {
-    return verifyReadAccessMobilePhase(persona, args, context);
-  }
-
+  // Gate already matched — skip straight through.
   if (!rawMobileArg && gateLast4 === persona.mobile_last_4) {
     return verifyReadAccessMobilePhase(persona, args, context);
   }
@@ -483,15 +479,22 @@ async function verifyReadAccessMobilePhaseAi(
     }
   }
 
-  if (ai.verdict === 'no_match' && ai.extractedLastFour) {
-    return verifyReadAccessMobilePhase(
-      persona,
-      { ...args, mobile_last_4: ai.extractedLastFour },
-      context,
-    );
-  }
-
-  return verifyReadAccessMobilePhase(persona, args, context);
+  // AI says no_match or unclear — return directly, no deterministic fallback.
+  return {
+    kind: 'terminal',
+    result: {
+      ok: false,
+      summary: ai.verdict === 'no_match'
+        ? '[neutral] Mobile last four match nahi hua. Kripya English mein last four digits ek baar phir batayein.'
+        : '[neutral] Samajh nahi aa paya. Kripya English mein last four digits ek baar phir clearly batayein.',
+      data: {
+        auth_tier: 'Tier B',
+        verification_step: 'mobile_last_4_required',
+        verified: false,
+        mobile_step_verified: false,
+      },
+    },
+  };
 }
 
 async function verifyReadAccessWithAi(

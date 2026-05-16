@@ -509,7 +509,7 @@ test('executeStableToolWithContext rejects mobile last four when AI returns no_m
   }
 });
 
-test('executeStableToolWithContext skips AI mobile path when args already contain four digits', async () => {
+test('executeStableToolWithContext routes clean four digits through AI too', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -530,7 +530,7 @@ test('executeStableToolWithContext skips AI mobile path when args already contai
     );
     assert.equal(result.ok, true);
     assert.equal(result.data?.mobile_step_verified, true);
-    assert.equal(mobileFetchCalls, 0);
+    assert.equal(mobileFetchCalls, 1);
   } finally {
     if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = priorKey;

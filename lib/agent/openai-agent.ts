@@ -115,7 +115,7 @@ export interface AgentTimingEvent {
 
 type AgentDebugEvent =
   | { type: 'route'; route: StableIntentRoute }
-  | { type: 'tool'; tool: string; phase: 'start' | 'result'; [k: string]: unknown }
+  | { type: 'tool'; tool: string; phase: 'start' | 'result';[k: string]: unknown }
   | { type: 'stream'; event: Record<string, unknown> }
   | { type: 'timing'; timing: AgentTimingEvent };
 
@@ -371,17 +371,14 @@ function buildTieredRouteInstructions(input: {
   if (route.authTier === 'Tier B' && !callVerified && !toolContext?.verifiedMobileLast4) {
     lines.push('Current turn is Tier B and caller is not verified.');
     lines.push('Do not use account tools until verify_read_access succeeds for this session.');
-    lines.push('Ask only for the registered mobile number last four digits on this turn.');
+    lines.push('Ask for the registered mobile number last four digits on this turn. Ask the caller to say the four digits in English, this is very important (e.g. "five five nine eight" or "5598").');
     lines.push('Do not ask for date of birth in the same reply as the mobile last-four request.');
     lines.push('Ask for date of birth only after the mobile last-four step has matched.');
     lines.push('Never say DOB aloud; say date of birth in full words.');
     lines.push('Apni date of birth batayein in natural conversational Hinglish.');
     lines.push('Never ask for a specific date format, Y words, rigid separators, or digit-heavy templates.');
     lines.push(
-      'Accept the caller\'s answer in any language or script (English, Hindi, Hinglish, Urdu, Arabic, Devanagari, mixed code-switching, words like "double", "triple", "ek do teen char", "ون ون ٹو تھری", "ڈبل ون ٹو تھری").',
-    );
-    lines.push(
-      'Never tell the caller to repeat in a specific script, in Roman, in English, in numerals, or in any particular format. The server handles extraction.',
+      'If the caller says digits in a non-English language or script, politely ask them to repeat in English: "Kripya English mein digits bata dijiye, jaise five five nine eight."',
     );
     lines.push(
       'When the caller answers, always call verify_read_access. Pass the caller\'s verbatim utterance as mobile_last_4 (or as date_of_birth in the DOB phase) if you cannot confidently decode the digits or date yourself. The server will semantically match it against the record.',
@@ -1038,324 +1035,324 @@ export async function streamStableAgentText(
   });
 
   try {
-  const route = await resolveRouteForAgent(input);
-  emitTiming('route_resolved', { intent: route.intent, authTier: route.authTier });
-  onDebug?.({ type: 'route', route });
+    const route = await resolveRouteForAgent(input);
+    emitTiming('route_resolved', { intent: route.intent, authTier: route.authTier });
+    onDebug?.({ type: 'route', route });
 
-  const verifiedRef = { current: input.callVerified === true };
-  const toolCalls: string[] = [];
-  const mergedBase: BuildOpenAIResponseRequestInput = { ...input, route };
+    const verifiedRef = { current: input.callVerified === true };
+    const toolCalls: string[] = [];
+    const mergedBase: BuildOpenAIResponseRequestInput = { ...input, route };
 
-  let messages: OpenAIInput[] = buildOpenAIResponseRequest({ ...mergedBase, callVerified: verifiedRef.current }).input;
+    let messages: OpenAIInput[] = buildOpenAIResponseRequest({ ...mergedBase, callVerified: verifiedRef.current }).input;
 
-  let streamPasses = 0;
-  const runOneStream = async (onDelta?: (delta: string) => void, onDebug?: (event: AgentDebugEvent) => void): Promise<{
-    textDeltas: string[];
-    incomplete: boolean;
-    serverError: boolean;
-    streamedFunction?: { call_id: string; name: string; arguments: string };
-  }> => {
-    const merged: BuildOpenAIResponseRequestInput = { ...mergedBase, callVerified: verifiedRef.current };
-    const toolNames = selectToolNamesForRequest({
-      route,
-      callVerified: sessionCallVerified(input, verifiedRef),
-      toolContext: input.toolContext,
-      transcript: input.transcript,
-      history: input.history,
-    });
-    const toolsPayload = declarationsForToolNames(toolNames);
-    const streamModel = getAgentModel();
-    const request: OpenAIResponseRequest = {
-      model: streamModel,
-      instructions: buildStableAgentInstructions(merged, toolNames),
-      input: messages,
-      tools: toolsPayload.length > 0 ? toolsPayload : undefined,
-      max_output_tokens: AGENT_INITIAL_MAX_OUTPUT_TOKENS,
-      ...reasoningFieldsForModel(streamModel),
-      stream: true,
-    };
-
-    const pass = streamPasses + 1;
-    streamPasses = pass;
-    emitTiming('openai_stream_request_start', {
-      pass,
-      model: request.model,
-      tools: toolsPayload.map((tool) => tool.name),
-      inputMessages: messages.length,
-    });
-    const stream = await createOpenAIResponseStream(apiKey, request);
-    emitTiming('openai_stream_response_ready', { pass });
-    onDebug?.({ type: 'stream', event: { type: 'start' } });
-    const state: StreamState = { textDeltas: [], incompleteFromStream: false, serverError: false };
-    let sawFirstEvent = false;
-    await readSseStream(stream, (ev) => {
-      if (!sawFirstEvent) {
-        sawFirstEvent = true;
-        emitTiming('openai_stream_first_event', {
-          pass,
-          eventType: typeof ev.type === 'string' ? ev.type : 'unknown',
-        });
-      }
-      applyStreamEvent(state, ev, onDelta, onDebug);
-    });
-    emitTiming('openai_stream_end', {
-      pass,
-      textDeltas: state.textDeltas.length,
-      incomplete: state.incompleteFromStream,
-      serverError: state.serverError,
-      streamedFunction: state.activeFunction?.name,
-    });
-    onDebug?.({ type: 'stream', event: { type: 'end', textDeltas: state.textDeltas.length } });
-
-    if (state.serverError) {
-      return { textDeltas: [], incomplete: false, serverError: true };
-    }
-
-    if (state.activeFunction?.name) {
-      const norm = normalizeFunctionCall({
-        type: 'function_call',
-        name: state.activeFunction.name,
-        arguments: state.activeFunction.arguments,
-        call_id: state.activeFunction.callId || `streamed_${state.activeFunction.name}`,
-      });
-      if (norm) {
-        return {
-          textDeltas: [],
-          incomplete: state.incompleteFromStream,
-          serverError: false,
-          streamedFunction: norm,
-        };
-      }
-    }
-
-    return {
-      textDeltas: state.textDeltas,
-      incomplete: state.incompleteFromStream,
-      serverError: false,
-    };
-  };
-
-  const pass1 = await runOneStream(undefined, onDebug);
-
-  const recoverTextWithoutStreaming = async (maxOutputTokens: number): Promise<string> => {
-    const merged: BuildOpenAIResponseRequestInput = { ...mergedBase, callVerified: verifiedRef.current };
-    const toolNames = selectToolNamesForRequest({
-      route,
-      callVerified: sessionCallVerified(input, verifiedRef),
-      toolContext: input.toolContext,
-      transcript: input.transcript,
-      history: input.history,
-    });
-    const toolsPayload = declarationsForToolNames(toolNames);
-    const recoveryModel = getAgentModel();
-    emitTiming('openai_recovery_request_start', { maxOutputTokens });
-    const json = await createOpenAIResponse(apiKey, {
-      model: recoveryModel,
-      instructions: buildStableAgentInstructions(merged, toolNames),
-      input: messages,
-      tools: toolsPayload.length > 0 ? toolsPayload : undefined,
-      max_output_tokens: maxOutputTokens,
-      ...reasoningFieldsForModel(recoveryModel),
-    });
-    emitTiming('openai_recovery_response_ready', {
-      maxOutputTokens,
-      status: json.status,
-      outputItems: json.output?.length ?? 0,
-    });
-    return normalizeHinglishDobAsk(extractOpenAIText(json));
-  };
-
-  if (pass1.serverError) {
-    const t = await recoverTextWithoutStreaming(AGENT_INITIAL_MAX_OUTPUT_TOKENS);
-    return { text: t, toolCalls: [], verified: verifiedRef.current };
-  }
-
-  if (pass1.streamedFunction) {
-    const fc = pass1.streamedFunction;
-    const rawArgs = parseToolArguments(fc.arguments);
-    const mergedArgs = fc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, rawArgs) : rawArgs;
-    const debugArgs = { ...mergedArgs } as Record<string, unknown>;
-    if (!debugArgs.date_of_birth || String(debugArgs.date_of_birth).trim() === '') {
-      delete debugArgs.date_of_birth;
-    }
-
-    onDebug?.({
-      type: 'tool',
-      tool: fc.name,
-      phase: 'start',
-      arguments: debugArgs,
-      verified: verifiedRef.current,
-    } as { type: 'tool'; tool: string; phase: 'start'; [k: string]: unknown });
-
-    const execCtx = buildExecutionContext(input, verifiedRef);
-    emitTiming('tool_execution_start', { tool: fc.name });
-    const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
-    emitTiming('tool_execution_end', { tool: fc.name, ok: toolResult.ok });
-
-    onDebug?.({
-      type: 'tool',
-      tool: fc.name,
-      phase: 'result',
-      ok: toolResult.ok,
-      verified: toolResult.data?.verified === true,
-    } as { type: 'tool'; tool: string; phase: 'result'; [k: string]: unknown });
-
-    const hadPriorVerifyInRun = toolCalls.includes('verify_read_access');
-    toolCalls.push(fc.name);
-
-    const allowed = expandAllowedToolNames(
-      route,
-      selectToolNamesForRequest({
+    let streamPasses = 0;
+    const runOneStream = async (onDelta?: (delta: string) => void, onDebug?: (event: AgentDebugEvent) => void): Promise<{
+      textDeltas: string[];
+      incomplete: boolean;
+      serverError: boolean;
+      streamedFunction?: { call_id: string; name: string; arguments: string };
+    }> => {
+      const merged: BuildOpenAIResponseRequestInput = { ...mergedBase, callVerified: verifiedRef.current };
+      const toolNames = selectToolNamesForRequest({
         route,
         callVerified: sessionCallVerified(input, verifiedRef),
         toolContext: input.toolContext,
         transcript: input.transcript,
         history: input.history,
-      }),
-      input.callVerified === true,
-    );
+      });
+      const toolsPayload = declarationsForToolNames(toolNames);
+      const streamModel = getAgentModel();
+      const request: OpenAIResponseRequest = {
+        model: streamModel,
+        instructions: buildStableAgentInstructions(merged, toolNames),
+        input: messages,
+        tools: toolsPayload.length > 0 ? toolsPayload : undefined,
+        max_output_tokens: AGENT_INITIAL_MAX_OUTPUT_TOKENS,
+        ...reasoningFieldsForModel(streamModel),
+        stream: true,
+      };
 
-    if (!allowed.has(fc.name)) {
-      onDelta(BLOCKED_ACCOUNT_TOOL_SUMMARY);
-      return { text: BLOCKED_ACCOUNT_TOOL_SUMMARY, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      const pass = streamPasses + 1;
+      streamPasses = pass;
+      emitTiming('openai_stream_request_start', {
+        pass,
+        model: request.model,
+        tools: toolsPayload.map((tool) => tool.name),
+        inputMessages: messages.length,
+      });
+      const stream = await createOpenAIResponseStream(apiKey, request);
+      emitTiming('openai_stream_response_ready', { pass });
+      onDebug?.({ type: 'stream', event: { type: 'start' } });
+      const state: StreamState = { textDeltas: [], incompleteFromStream: false, serverError: false };
+      let sawFirstEvent = false;
+      await readSseStream(stream, (ev) => {
+        if (!sawFirstEvent) {
+          sawFirstEvent = true;
+          emitTiming('openai_stream_first_event', {
+            pass,
+            eventType: typeof ev.type === 'string' ? ev.type : 'unknown',
+          });
+        }
+        applyStreamEvent(state, ev, onDelta, onDebug);
+      });
+      emitTiming('openai_stream_end', {
+        pass,
+        textDeltas: state.textDeltas.length,
+        incomplete: state.incompleteFromStream,
+        serverError: state.serverError,
+        streamedFunction: state.activeFunction?.name,
+      });
+      onDebug?.({ type: 'stream', event: { type: 'end', textDeltas: state.textDeltas.length } });
+
+      if (state.serverError) {
+        return { textDeltas: [], incomplete: false, serverError: true };
+      }
+
+      if (state.activeFunction?.name) {
+        const norm = normalizeFunctionCall({
+          type: 'function_call',
+          name: state.activeFunction.name,
+          arguments: state.activeFunction.arguments,
+          call_id: state.activeFunction.callId || `streamed_${state.activeFunction.name}`,
+        });
+        if (norm) {
+          return {
+            textDeltas: [],
+            incomplete: state.incompleteFromStream,
+            serverError: false,
+            streamedFunction: norm,
+          };
+        }
+      }
+
+      return {
+        textDeltas: state.textDeltas,
+        incomplete: state.incompleteFromStream,
+        serverError: false,
+      };
+    };
+
+    const pass1 = await runOneStream(undefined, onDebug);
+
+    const recoverTextWithoutStreaming = async (maxOutputTokens: number): Promise<string> => {
+      const merged: BuildOpenAIResponseRequestInput = { ...mergedBase, callVerified: verifiedRef.current };
+      const toolNames = selectToolNamesForRequest({
+        route,
+        callVerified: sessionCallVerified(input, verifiedRef),
+        toolContext: input.toolContext,
+        transcript: input.transcript,
+        history: input.history,
+      });
+      const toolsPayload = declarationsForToolNames(toolNames);
+      const recoveryModel = getAgentModel();
+      emitTiming('openai_recovery_request_start', { maxOutputTokens });
+      const json = await createOpenAIResponse(apiKey, {
+        model: recoveryModel,
+        instructions: buildStableAgentInstructions(merged, toolNames),
+        input: messages,
+        tools: toolsPayload.length > 0 ? toolsPayload : undefined,
+        max_output_tokens: maxOutputTokens,
+        ...reasoningFieldsForModel(recoveryModel),
+      });
+      emitTiming('openai_recovery_response_ready', {
+        maxOutputTokens,
+        status: json.status,
+        outputItems: json.output?.length ?? 0,
+      });
+      return normalizeHinglishDobAsk(extractOpenAIText(json));
+    };
+
+    if (pass1.serverError) {
+      const t = await recoverTextWithoutStreaming(AGENT_INITIAL_MAX_OUTPUT_TOKENS);
+      return { text: t, toolCalls: [], verified: verifiedRef.current };
     }
 
-    if (fc.name === 'verify_read_access') {
-      const verificationSucceeded = toolResult.data?.verified === true;
-      if (toolResult.data?.verified === true || (toolResult.ok && process.env.STABLE_DISABLE_AI_DOB === '1')) {
-        verifiedRef.current = true;
+    if (pass1.streamedFunction) {
+      const fc = pass1.streamedFunction;
+      const rawArgs = parseToolArguments(fc.arguments);
+      const mergedArgs = fc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, rawArgs) : rawArgs;
+      const debugArgs = { ...mergedArgs } as Record<string, unknown>;
+      if (!debugArgs.date_of_birth || String(debugArgs.date_of_birth).trim() === '') {
+        delete debugArgs.date_of_birth;
       }
-      if (verificationSucceeded && route.tools.some((tool) => tool !== 'verify_read_access')) {
-        messages = [
-          ...messages,
-          { type: 'function_call', call_id: fc.call_id, name: fc.name, arguments: fc.arguments ?? '{}' },
-          { type: 'function_call_output', call_id: fc.call_id, output: JSON.stringify(toolResult) },
-        ];
 
-        const nextPass = await runOneStream(undefined, onDebug);
-        if (nextPass.serverError) {
-          const recovered = await recoverTextWithoutStreaming(AGENT_INITIAL_MAX_OUTPUT_TOKENS);
-          onDelta(recovered);
-          return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      onDebug?.({
+        type: 'tool',
+        tool: fc.name,
+        phase: 'start',
+        arguments: debugArgs,
+        verified: verifiedRef.current,
+      } as { type: 'tool'; tool: string; phase: 'start';[k: string]: unknown });
+
+      const execCtx = buildExecutionContext(input, verifiedRef);
+      emitTiming('tool_execution_start', { tool: fc.name });
+      const toolResult = await executeStableToolWithContext(input.persona, fc.name, mergedArgs, execCtx);
+      emitTiming('tool_execution_end', { tool: fc.name, ok: toolResult.ok });
+
+      onDebug?.({
+        type: 'tool',
+        tool: fc.name,
+        phase: 'result',
+        ok: toolResult.ok,
+        verified: toolResult.data?.verified === true,
+      } as { type: 'tool'; tool: string; phase: 'result';[k: string]: unknown });
+
+      const hadPriorVerifyInRun = toolCalls.includes('verify_read_access');
+      toolCalls.push(fc.name);
+
+      const allowed = expandAllowedToolNames(
+        route,
+        selectToolNamesForRequest({
+          route,
+          callVerified: sessionCallVerified(input, verifiedRef),
+          toolContext: input.toolContext,
+          transcript: input.transcript,
+          history: input.history,
+        }),
+        input.callVerified === true,
+      );
+
+      if (!allowed.has(fc.name)) {
+        onDelta(BLOCKED_ACCOUNT_TOOL_SUMMARY);
+        return { text: BLOCKED_ACCOUNT_TOOL_SUMMARY, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      }
+
+      if (fc.name === 'verify_read_access') {
+        const verificationSucceeded = toolResult.data?.verified === true;
+        if (toolResult.data?.verified === true || (toolResult.ok && process.env.STABLE_DISABLE_AI_DOB === '1')) {
+          verifiedRef.current = true;
         }
+        if (verificationSucceeded && route.tools.some((tool) => tool !== 'verify_read_access')) {
+          messages = [
+            ...messages,
+            { type: 'function_call', call_id: fc.call_id, name: fc.name, arguments: fc.arguments ?? '{}' },
+            { type: 'function_call_output', call_id: fc.call_id, output: JSON.stringify(toolResult) },
+          ];
 
-        if (nextPass.streamedFunction) {
-          const nextFc = nextPass.streamedFunction;
-          const nextRawArgs = parseToolArguments(nextFc.arguments);
-          const nextDebugArgs = { ...nextRawArgs } as Record<string, unknown>;
-          onDebug?.({
-            type: 'tool',
-            tool: nextFc.name,
-            phase: 'start',
-            arguments: nextDebugArgs,
-            verified: verifiedRef.current,
-          } as { type: 'tool'; tool: string; phase: 'start'; [k: string]: unknown });
+          const nextPass = await runOneStream(undefined, onDebug);
+          if (nextPass.serverError) {
+            const recovered = await recoverTextWithoutStreaming(AGENT_INITIAL_MAX_OUTPUT_TOKENS);
+            onDelta(recovered);
+            return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
+          }
 
-          const nextAllowed = expandAllowedToolNames(
-            route,
-            selectToolNamesForRequest({
+          if (nextPass.streamedFunction) {
+            const nextFc = nextPass.streamedFunction;
+            const nextRawArgs = parseToolArguments(nextFc.arguments);
+            const nextDebugArgs = { ...nextRawArgs } as Record<string, unknown>;
+            onDebug?.({
+              type: 'tool',
+              tool: nextFc.name,
+              phase: 'start',
+              arguments: nextDebugArgs,
+              verified: verifiedRef.current,
+            } as { type: 'tool'; tool: string; phase: 'start';[k: string]: unknown });
+
+            const nextAllowed = expandAllowedToolNames(
               route,
-              callVerified: sessionCallVerified(input, verifiedRef),
-              toolContext: input.toolContext,
-              transcript: input.transcript,
-              history: input.history,
-            }),
-            input.callVerified === true,
-          );
+              selectToolNamesForRequest({
+                route,
+                callVerified: sessionCallVerified(input, verifiedRef),
+                toolContext: input.toolContext,
+                transcript: input.transcript,
+                history: input.history,
+              }),
+              input.callVerified === true,
+            );
 
-          if (!nextAllowed.has(nextFc.name)) {
-            onDelta(BLOCKED_ACCOUNT_TOOL_SUMMARY);
-            return { text: BLOCKED_ACCOUNT_TOOL_SUMMARY, toolCalls: [...toolCalls], verified: verifiedRef.current };
+            if (!nextAllowed.has(nextFc.name)) {
+              onDelta(BLOCKED_ACCOUNT_TOOL_SUMMARY);
+              return { text: BLOCKED_ACCOUNT_TOOL_SUMMARY, toolCalls: [...toolCalls], verified: verifiedRef.current };
+            }
+
+            emitTiming('tool_execution_start', { tool: nextFc.name });
+            const nextToolResult = await executeStableToolWithContext(
+              input.persona,
+              nextFc.name,
+              nextFc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, nextRawArgs) : nextRawArgs,
+              buildExecutionContext(input, verifiedRef),
+            );
+            emitTiming('tool_execution_end', { tool: nextFc.name, ok: nextToolResult.ok });
+
+            onDebug?.({
+              type: 'tool',
+              tool: nextFc.name,
+              phase: 'result',
+              ok: nextToolResult.ok,
+              verified: nextToolResult.data?.verified === true,
+            } as { type: 'tool'; tool: string; phase: 'result';[k: string]: unknown });
+
+            toolCalls.push(nextFc.name);
+            let nextSpoken = nextToolResult.summary;
+            if (nextToolResult.ok && isPaymentReconciliationTool(nextFc.name)) {
+              nextSpoken = formatPaymentToolSummary(nextToolResult.summary, { reassurance: false });
+            }
+            nextSpoken = normalizeHinglishDobAsk(nextSpoken);
+            onDelta(nextSpoken);
+            return { text: nextSpoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
           }
 
-          emitTiming('tool_execution_start', { tool: nextFc.name });
-          const nextToolResult = await executeStableToolWithContext(
-            input.persona,
-            nextFc.name,
-            nextFc.name === 'verify_read_access' ? normalizeVerifyReadAccessArgs(input, nextRawArgs) : nextRawArgs,
-            buildExecutionContext(input, verifiedRef),
-          );
-          emitTiming('tool_execution_end', { tool: nextFc.name, ok: nextToolResult.ok });
-
-          onDebug?.({
-            type: 'tool',
-            tool: nextFc.name,
-            phase: 'result',
-            ok: nextToolResult.ok,
-            verified: nextToolResult.data?.verified === true,
-          } as { type: 'tool'; tool: string; phase: 'result'; [k: string]: unknown });
-
-          toolCalls.push(nextFc.name);
-          let nextSpoken = nextToolResult.summary;
-          if (nextToolResult.ok && isPaymentReconciliationTool(nextFc.name)) {
-            nextSpoken = formatPaymentToolSummary(nextToolResult.summary, { reassurance: false });
+          if (nextPass.incomplete) {
+            const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
+            onDelta(recovered);
+            return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
           }
-          nextSpoken = normalizeHinglishDobAsk(nextSpoken);
-          onDelta(nextSpoken);
-          return { text: nextSpoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
-        }
 
-        if (nextPass.incomplete) {
+          const nextText = normalizeHinglishDobAsk(nextPass.textDeltas.join('').trim());
+          if (nextText) {
+            nextPass.textDeltas.forEach(onDelta);
+            return { text: nextText, toolCalls: [...toolCalls], verified: verifiedRef.current };
+          }
+
           const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
           onDelta(recovered);
           return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
         }
-
-        const nextText = normalizeHinglishDobAsk(nextPass.textDeltas.join('').trim());
-        if (nextText) {
-          nextPass.textDeltas.forEach(onDelta);
-          return { text: nextText, toolCalls: [...toolCalls], verified: verifiedRef.current };
+        let spoken = normalizeHinglishDobAsk(toolResult.summary);
+        if (
+          toolResult.data?.verified === true &&
+          /Date of birth match ho gaya/i.test(spoken) &&
+          /Verification complete hai/i.test(spoken)
+        ) {
+          spoken = '[neutral] Verification complete ho gaya.';
         }
+        onDelta(spoken);
+        return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      }
 
-        const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
-        onDelta(recovered);
-        return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      if (toolResult.ok) {
+        let spoken = toolResult.summary;
+        if (isPaymentReconciliationTool(fc.name)) {
+          spoken = formatPaymentToolSummary(toolResult.summary, {
+            reassurance: input.callVerified === true || !hadPriorVerifyInRun,
+          });
+        }
+        spoken = normalizeHinglishDobAsk(spoken);
+        onDelta(spoken);
+        return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
       }
-      let spoken = normalizeHinglishDobAsk(toolResult.summary);
-      if (
-        toolResult.data?.verified === true &&
-        /Date of birth match ho gaya/i.test(spoken) &&
-        /Verification complete hai/i.test(spoken)
-      ) {
-        spoken = '[neutral] Verification complete ho gaya.';
-      }
+
+      const spoken = normalizeHinglishDobAsk(toolResult.summary);
       onDelta(spoken);
       return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
     }
 
-    if (toolResult.ok) {
-      let spoken = toolResult.summary;
-      if (isPaymentReconciliationTool(fc.name)) {
-        spoken = formatPaymentToolSummary(toolResult.summary, {
-          reassurance: input.callVerified === true || !hadPriorVerifyInRun,
-        });
-      }
-      spoken = normalizeHinglishDobAsk(spoken);
-      onDelta(spoken);
-      return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
-    }
-
-    const spoken = normalizeHinglishDobAsk(toolResult.summary);
-    onDelta(spoken);
-    return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
-  }
-
-  if (pass1.incomplete && !pass1.streamedFunction) {
-    const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
-    onDelta(recovered);
-    return { text: recovered, toolCalls: [], verified: verifiedRef.current };
-  }
-
-  const firstText = normalizeHinglishDobAsk(pass1.textDeltas.join('').trim());
-  if (!firstText) {
-    const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
-    if (recovered) {
+    if (pass1.incomplete && !pass1.streamedFunction) {
+      const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
       onDelta(recovered);
       return { text: recovered, toolCalls: [], verified: verifiedRef.current };
     }
-  }
-  pass1.textDeltas.forEach(onDelta);
-  return { text: firstText, toolCalls: [], verified: verifiedRef.current };
+
+    const firstText = normalizeHinglishDobAsk(pass1.textDeltas.join('').trim());
+    if (!firstText) {
+      const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
+      if (recovered) {
+        onDelta(recovered);
+        return { text: recovered, toolCalls: [], verified: verifiedRef.current };
+      }
+    }
+    pass1.textDeltas.forEach(onDelta);
+    return { text: firstText, toolCalls: [], verified: verifiedRef.current };
   } finally {
     emitTiming('agent_finish');
   }
