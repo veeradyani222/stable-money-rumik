@@ -205,6 +205,10 @@ function accountToolsForRoute(route: StableIntentRoute): string[] {
   return route.tools.filter((t) => t !== 'verify_read_access');
 }
 
+function pendingAccountToolAfterVerification(route: StableIntentRoute, toolCalls: string[]): string | null {
+  return accountToolsForRoute(route).find((tool) => !toolCalls.includes(tool)) ?? null;
+}
+
 function lastModelText(history: AgentHistoryMessage[]): string {
   for (let i = history.length - 1; i >= 0; i -= 1) {
     if (history[i]?.role === 'model') return history[i].text;
@@ -438,7 +442,9 @@ function buildStableAgentInstructions(merged: BuildOpenAIResponseRequestInput, t
     'If the caller gives the ticket issue, briefly acknowledge before tool use: Main samajh gayi, main support ticket create kar deti hoon.',
     'After create_support_ticket succeeds with email_pending: true, say only: Support ticket create ho gaya hai. Confirmation email thodi der mein aa jayega.',
     'For Tier C secure actions, after required verification and any quote or status check, call send_secure_link.',
-    'After send_secure_link succeeds with email_pending: true, use the tool summary as-is; it already tells the caller the confirmation email will arrive shortly.',
+    'After send_secure_link succeeds with email_pending: true, use the tool output only as source data and answer only what the caller asked.',
+    'When any tool returns multiple records or more fields than the caller asked for, use the tool output only as source data and answer only the requested slice.',
+    'For contextual follow-ups after a summary, infer the requested slice from recent conversation and do not repeat unrelated records, ids, amounts, banks, dates, or timelines.',
     'Payment reassurance phrases you may use when payment is stressful (Roman script, Hinglish): aapka paisa safe hai; worst case mein refund mil jayega, koi loss nahi hoga.',
     `Money anxiety acknowledgement line (Hinglish, use when payment callers sound stressed): Main samajh sakti hoon ki aap pareshan hain. Main abhi status check karke batati hoon.`,
     `FD rate compare line (English, speak in Hinglish naturally): ${PROJECT_EXACT_LINES.rateCompare}`,
@@ -548,33 +554,6 @@ function parseToolArguments(value: string | undefined): Record<string, unknown> 
   } catch {
     return {};
   }
-}
-
-const PAYMENT_REASSURANCE_PREFIX =
-  '[neutral] Main samajh sakti hoon ki aap pareshan hain. Main abhi status check karke batati hoon. ';
-
-function stripLeadingToneTag(text: string): string {
-  return text.replace(/^\[[a-z]+\]\s*/i, '').trim();
-}
-
-function clipPaymentSummaryForVoice(summary: string): string {
-  const marker = 'reconciliation mein hai';
-  const idx = summary.indexOf(marker);
-  if (idx === -1) return summary.trim();
-  return summary.slice(0, idx + marker.length).trim();
-}
-
-function formatPaymentToolSummary(summary: string, options: { reassurance: boolean }): string {
-  const clipped = clipPaymentSummaryForVoice(summary);
-  if (!options.reassurance) {
-    return clipped;
-  }
-  const body = stripLeadingToneTag(clipped);
-  return `${PAYMENT_REASSURANCE_PREFIX}${body} aapka paisa safe hai aur worst case mein refund mil jayega, koi loss nahi hoga.`;
-}
-
-function isPaymentReconciliationTool(name: string): boolean {
-  return name === 'get_payment_reconciliation_status';
 }
 
 /**
@@ -909,6 +888,23 @@ export async function runStableAgent(
     const text = extractOpenAIText(json);
 
     if (!fc && text) {
+      const pendingTool = verifiedRef.current ? pendingAccountToolAfterVerification(route, toolCalls) : null;
+      if (pendingTool) {
+        const callId = `forced_${pendingTool}_${round}`;
+        const forcedToolResult = await executeStableToolWithContext(
+          input.persona,
+          pendingTool,
+          {},
+          buildExecutionContext(mergedBase, verifiedRef),
+        );
+        toolCalls.push(pendingTool);
+        messages = [
+          ...messages,
+          { type: 'function_call', call_id: callId, name: pendingTool, arguments: '{}' },
+          { type: 'function_call_output', call_id: callId, output: JSON.stringify(forcedToolResult) },
+        ];
+        continue;
+      }
       consecutiveEmpty = 0;
       return { text, toolCalls: [...toolCalls], verified: verifiedRef.current };
     }
@@ -985,22 +981,6 @@ export async function runStableAgent(
       { type: 'function_call_output', call_id: fc.call_id, output: JSON.stringify(toolResult) },
     ];
 
-    const skipFinalOpenAi =
-      fc.name !== 'verify_read_access' &&
-      toolResult.ok &&
-      !forceNoTools &&
-      fc.name !== 'send_secure_link';
-
-    if (skipFinalOpenAi) {
-      let spoken = toolResult.summary;
-      if (isPaymentReconciliationTool(fc.name)) {
-        const hadPriorVerifyInRun = toolCalls.includes('verify_read_access');
-        spoken = formatPaymentToolSummary(toolResult.summary, {
-          reassurance: input.callVerified === true || !hadPriorVerifyInRun,
-        });
-      }
-      return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
-    }
   }
 
   return {
@@ -1166,6 +1146,68 @@ export async function streamStableAgentText(
       return normalizeHinglishDobAsk(extractOpenAIText(json));
     };
 
+    const composeToolAnswerFromAi = async (
+      fc: { call_id: string; name: string; arguments: string },
+      toolResult: Awaited<ReturnType<typeof executeStableToolWithContext>>,
+    ): Promise<string> => {
+      messages = [
+        ...messages,
+        { type: 'function_call', call_id: fc.call_id, name: fc.name, arguments: fc.arguments ?? '{}' },
+        { type: 'function_call_output', call_id: fc.call_id, output: JSON.stringify(toolResult) },
+      ];
+
+      const answerPass = await runOneStream(undefined, onDebug);
+      if (answerPass.serverError || answerPass.incomplete || answerPass.streamedFunction) {
+        const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
+        onDelta(recovered);
+        return recovered;
+      }
+
+      const text = normalizeHinglishDobAsk(answerPass.textDeltas.join('').trim());
+      if (text) {
+        onDelta(text);
+        return text;
+      }
+
+      const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
+      onDelta(recovered);
+      return recovered;
+    };
+
+    const executePendingAccountTool = async (): Promise<string | null> => {
+      const pendingTool = pendingAccountToolAfterVerification(route, toolCalls);
+      if (!pendingTool) return null;
+      const callId = `forced_${pendingTool}_${toolCalls.length + 1}`;
+
+      onDebug?.({
+        type: 'tool',
+        tool: pendingTool,
+        phase: 'start',
+        arguments: {},
+        verified: verifiedRef.current,
+      } as { type: 'tool'; tool: string; phase: 'start';[k: string]: unknown });
+
+      emitTiming('tool_execution_start', { tool: pendingTool, forcedAfterVerification: true });
+      const forcedToolResult = await executeStableToolWithContext(
+        input.persona,
+        pendingTool,
+        {},
+        buildExecutionContext(mergedBase, verifiedRef),
+      );
+      emitTiming('tool_execution_end', { tool: pendingTool, ok: forcedToolResult.ok, forcedAfterVerification: true });
+
+      onDebug?.({
+        type: 'tool',
+        tool: pendingTool,
+        phase: 'result',
+        ok: forcedToolResult.ok,
+        verified: forcedToolResult.data?.verified === true,
+      } as { type: 'tool'; tool: string; phase: 'result';[k: string]: unknown });
+
+      toolCalls.push(pendingTool);
+      return composeToolAnswerFromAi({ call_id: callId, name: pendingTool, arguments: '{}' }, forcedToolResult);
+    };
+
     if (pass1.serverError) {
       const t = await recoverTextWithoutStreaming(AGENT_INITIAL_MAX_OUTPUT_TOKENS);
       return { text: t, toolCalls: [], verified: verifiedRef.current };
@@ -1201,7 +1243,6 @@ export async function streamStableAgentText(
         verified: toolResult.data?.verified === true,
       } as { type: 'tool'; tool: string; phase: 'result';[k: string]: unknown });
 
-      const hadPriorVerifyInRun = toolCalls.includes('verify_read_access');
       toolCalls.push(fc.name);
 
       const allowed = expandAllowedToolNames(
@@ -1287,16 +1328,15 @@ export async function streamStableAgentText(
             } as { type: 'tool'; tool: string; phase: 'result';[k: string]: unknown });
 
             toolCalls.push(nextFc.name);
-            let nextSpoken = nextToolResult.summary;
-            if (nextToolResult.ok && isPaymentReconciliationTool(nextFc.name)) {
-              nextSpoken = formatPaymentToolSummary(nextToolResult.summary, { reassurance: false });
-            }
-            nextSpoken = normalizeHinglishDobAsk(nextSpoken);
-            onDelta(nextSpoken);
+            const nextSpoken = await composeToolAnswerFromAi(nextFc, nextToolResult);
             return { text: nextSpoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
           }
 
           if (nextPass.incomplete) {
+            const forcedText = await executePendingAccountTool();
+            if (forcedText) {
+              return { text: forcedText, toolCalls: [...toolCalls], verified: verifiedRef.current };
+            }
             const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
             onDelta(recovered);
             return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
@@ -1304,40 +1344,28 @@ export async function streamStableAgentText(
 
           const nextText = normalizeHinglishDobAsk(nextPass.textDeltas.join('').trim());
           if (nextText) {
-            nextPass.textDeltas.forEach(onDelta);
+            const forcedText = await executePendingAccountTool();
+            if (forcedText) {
+              return { text: forcedText, toolCalls: [...toolCalls], verified: verifiedRef.current };
+            }
+            onDelta(nextText);
             return { text: nextText, toolCalls: [...toolCalls], verified: verifiedRef.current };
+          }
+
+          const forcedText = await executePendingAccountTool();
+          if (forcedText) {
+            return { text: forcedText, toolCalls: [...toolCalls], verified: verifiedRef.current };
           }
 
           const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
           onDelta(recovered);
           return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
         }
-        let spoken = normalizeHinglishDobAsk(toolResult.summary);
-        if (
-          toolResult.data?.verified === true &&
-          /Date of birth match ho gaya/i.test(spoken) &&
-          /Verification complete hai/i.test(spoken)
-        ) {
-          spoken = '[neutral] Verification complete ho gaya.';
-        }
-        onDelta(spoken);
+        const spoken = await composeToolAnswerFromAi(fc, toolResult);
         return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
       }
 
-      if (toolResult.ok) {
-        let spoken = toolResult.summary;
-        if (isPaymentReconciliationTool(fc.name)) {
-          spoken = formatPaymentToolSummary(toolResult.summary, {
-            reassurance: input.callVerified === true || !hadPriorVerifyInRun,
-          });
-        }
-        spoken = normalizeHinglishDobAsk(spoken);
-        onDelta(spoken);
-        return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
-      }
-
-      const spoken = normalizeHinglishDobAsk(toolResult.summary);
-      onDelta(spoken);
+      const spoken = await composeToolAnswerFromAi(fc, toolResult);
       return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
     }
 

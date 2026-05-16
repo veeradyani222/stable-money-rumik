@@ -58,6 +58,8 @@ test('buildOpenAIResponseRequest includes persona context, tools, and short-call
   assert.match(request.instructions, /worst case mein refund mil jayega, koi loss nahi hoga/);
   assert.match(request.instructions, /Never repeat the welcome, recording notice, or menu of things you can help with/i);
   assert.match(request.instructions, /For task turns, answer directly without restarting the call opening/i);
+  assert.match(request.instructions, /answer only what the caller asked/i);
+  assert.match(request.instructions, /do not repeat unrelated records/i);
   assert.doesNotMatch(request.instructions, /Namaste, Stable Money support par aapka swagat hai/i);
   assert.match(request.instructions, /Do not wait for the caller to speak first/i);
   assert.match(request.instructions, /Hard Rumik speech output rule/i);
@@ -840,13 +842,16 @@ test('runStableAgent can continue from DOB verification to the original account 
         { role: 'user', text: '3210' },
         { role: 'model', text: '[neutral] DOB bata dijiye.' },
       ],
+      route: testRoute('payment.failed'),
+      skipAiMobileVerification: true,
     });
 
-    assert.match(result.text, /^\[neutral\] PAY-8831 HDFC se rupees 50,000 ka payment pending reconciliation mein hai/);
+    assert.equal(result.text, '[neutral] Payment pending reconciliation mein hai.');
     assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_payment_reconciliation_status']);
     assert.equal(result.verified, true);
-    assert.equal(callCount, 2);
-    assert.equal(requestBodies.length, 2);
+    assert.equal(callCount, 3);
+    assert.equal(requestBodies.length, 3);
+    assert.match(JSON.stringify(requestBodies.at(-1)), /PAY-8831/);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1020,7 +1025,7 @@ test('runStableAgent preserves verified call state on later turns', async () => 
       ok: true,
       status: 200,
       json: async () => ({
-        output: [{ type: 'message', content: [{ type: 'output_text', text: '[neutral] FD details mil gayi.' }] }],
+        output: [{ type: 'message', content: [{ type: 'output_text', text: '[neutral] Aapka KYC pending review hai.' }] }],
       }),
     } as Response;
   }) as typeof fetch;
@@ -1040,6 +1045,7 @@ test('runStableAgent preserves verified call state on later turns', async () => 
     assert.match(result.text, /^\[neutral\] Aapka KYC pending review hai/);
     assert.equal(result.verified, true);
     assert.deepEqual(result.toolCalls, ['get_kyc_status']);
+    assert.equal(callCount, 2);
     const initialRequest = requestBodies[0] as { instructions: string };
     assert.match(initialRequest.instructions, /Call verification status: verified/i);
     assert.doesNotMatch(initialRequest.instructions, /After the first caller message.*last four digits/i);
@@ -1050,7 +1056,7 @@ test('runStableAgent preserves verified call state on later turns', async () => 
   }
 });
 
-test('runStableAgent returns Rumik-safe tool summaries directly after account tool calls', async () => {
+test('runStableAgent lets AI compose caller-facing text after account tool calls', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -1059,8 +1065,20 @@ test('runStableAgent returns Rumik-safe tool summaries directly after account to
   const originalModel = process.env.OPENAI_AGENT_MODEL;
 
   let callCount = 0;
-  globalThis.fetch = (async () => {
+  const requestBodies: unknown[] = [];
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     callCount += 1;
+    requestBodies.push(JSON.parse(String(init?.body)));
+    if (callCount === 2) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          output: [{ type: 'message', content: [{ type: 'output_text', text: '[neutral] Aapka KYC pending review hai.' }] }],
+        }),
+      } as Response;
+    }
+
     return {
       ok: true,
       status: 200,
@@ -1089,13 +1107,11 @@ test('runStableAgent returns Rumik-safe tool summaries directly after account to
       route: testRoute('kyc.status'),
     });
 
-    assert.equal(callCount, 1);
+    assert.equal(callCount, 2);
     assert.deepEqual(result.toolCalls, ['get_kyc_status']);
     assert.equal(result.verified, true);
-    assert.match(result.text, /^\[neutral\] /);
-    assert.match(result.text, /KYC/i);
-    assert.doesNotMatch(result.text.replace(/^\[neutral\] /, ''), /[₹;()[\]{}]/);
-    assert.doesNotMatch(result.text, /[\u0900-\u097F]/);
+    assert.equal(result.text, '[neutral] Aapka KYC pending review hai.');
+    assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output/);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1103,7 +1119,7 @@ test('runStableAgent returns Rumik-safe tool summaries directly after account to
   }
 });
 
-test('runStableAgent deterministically reassures before payment tool summaries', async () => {
+test('runStableAgent lets AI reassure before payment tool answers', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -1111,20 +1127,44 @@ test('runStableAgent deterministically reassures before payment tool summaries',
   const originalApiKey = process.env.OPENAI_API_KEY;
   const originalModel = process.env.OPENAI_AGENT_MODEL;
 
-  globalThis.fetch = (async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      output: [
-        {
-          type: 'function_call',
-          call_id: 'call_payment',
-          name: 'get_payment_reconciliation_status',
-          arguments: '{"reference":"PAY-8831"}',
-        },
-      ],
-    }),
-  }) as Response) as typeof fetch;
+  let callCount = 0;
+  globalThis.fetch = (async () => {
+    callCount += 1;
+    if (callCount === 2) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          output: [
+            {
+              type: 'message',
+              content: [
+                {
+                  type: 'output_text',
+                  text: '[neutral] Main samajh sakti hoon ki aap pareshan hain. PAY-8831 payment pending reconciliation mein hai. Aapka paisa safe hai.',
+                },
+              ],
+            },
+          ],
+        }),
+      } as Response;
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output: [
+          {
+            type: 'function_call',
+            call_id: 'call_payment',
+            name: 'get_payment_reconciliation_status',
+            arguments: '{"reference":"PAY-8831"}',
+          },
+        ],
+      }),
+    } as Response;
+  }) as typeof fetch;
 
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
@@ -1140,11 +1180,11 @@ test('runStableAgent deterministically reassures before payment tool summaries',
 
     assert.deepEqual(result.toolCalls, ['get_payment_reconciliation_status']);
     assert.equal(result.verified, true);
-    assert.match(
+    assert.equal(
       result.text,
-      /^\[neutral\] Main samajh sakti hoon ki aap pareshan hain\. Main abhi status check karke batati hoon\. PAY-8831/,
+      '[neutral] Main samajh sakti hoon ki aap pareshan hain. PAY-8831 payment pending reconciliation mein hai. Aapka paisa safe hai.',
     );
-    assert.match(result.text, /aapka paisa safe hai/);
+    assert.equal(callCount, 2);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1195,7 +1235,7 @@ test('runStableAgent uses a no-tool recovery response when OpenAI returns no usa
     assert.equal(result.text, '[neutral] Maaf kijiye, ab main help karti hoon.');
     assert.deepEqual(result.toolCalls, []);
     assert.equal(callCount, 4);
-    assert.equal((requestBodies.at(-1) as { tools?: unknown[] }).tools?.length, 0);
+    assert.equal((requestBodies.at(-1) as { tools?: unknown[] }).tools?.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1421,7 +1461,7 @@ test('runStableAgent stops a repeated tool loop with a no-tool recovery response
     });
 
     assert.equal(result.text, '[neutral] Verification complete hai. Ab KYC status check kar sakti hoon.');
-    assert.deepEqual(result.toolCalls, ['verify_read_access', 'verify_read_access']);
+    assert.deepEqual(result.toolCalls, ['verify_read_access']);
     assert.equal(result.verified, true);
     assert.equal(callCount, 3);
     assert.equal((requestBodies.at(-1) as { tools?: unknown[] }).tools?.length, 0);
@@ -1854,14 +1894,15 @@ test('streamStableAgentText accepts streamed tool call ids from Responses events
           { role: 'user', text: 'Mera payment status batao' },
           { role: 'model', text: '[neutral] Verification ke liye mobile number ke last four digits bata dijiye.' },
         ],
+        route: testRoute('payment.failed'),
       },
       (delta) => chunks.push(delta),
     );
 
-    assert.equal(streamBodies.length, 1);
+    assert.equal(streamBodies.length, 2);
     assert.deepEqual(result.toolCalls, ['verify_read_access']);
-    assert.equal(result.text, '[neutral] Mobile last four match ho gaya. Apni date of birth batayein.');
-    assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. Apni date of birth batayein.']);
+    assert.equal(result.text, '[neutral] Mobile last four match ho gaya. Kripya date of birth batayein.');
+    assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. Kripya date of birth batayein.']);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1989,13 +2030,23 @@ test('streamStableAgentText continues from successful DOB verification to FD sum
       '',
     ].join('\n'),
   );
+  const answerStream = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai."}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed"},"sequence_number":0}',
+      '',
+    ].join('\n'),
+  );
   const requestBodies: unknown[] = [];
 
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     requestBodies.push(JSON.parse(String(init?.body)));
     const body = requestBodies.at(-1) as { stream?: boolean };
     assert.equal(body.stream, true);
-    const encoded = requestBodies.length === 1 ? verifyStream : fdStream;
+    const encoded = requestBodies.length === 1 ? verifyStream : requestBodies.length === 2 ? fdStream : answerStream;
     return {
       ok: true,
       status: 200,
@@ -2032,11 +2083,103 @@ test('streamStableAgentText continues from successful DOB verification to FD sum
 
     assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_fd_summary']);
     assert.equal(result.verified, true);
-    assert.match(result.text, /^\[neutral\] FD-/);
-    assert.match(result.text, / ki FD /);
+    assert.equal(result.text, '[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.');
     assert.deepEqual(chunks, [result.text]);
-    assert.equal(requestBodies.length, 2);
+    assert.equal(requestBodies.length, 3);
     assert.deepEqual((requestBodies[1] as { tools?: Array<{ name: string }> }).tools?.map((tool) => tool.name), ['get_fd_summary']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalApiKey;
+    process.env.OPENAI_AGENT_MODEL = originalModel;
+    process.env.STABLE_DISABLE_AI_DOB = originalDisableAiDob;
+  }
+});
+
+test('streamStableAgentText forces pending account tool after DOB verification instead of stopping at checking copy', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalModel = process.env.OPENAI_AGENT_MODEL;
+  const originalDisableAiDob = process.env.STABLE_DISABLE_AI_DOB;
+
+  const verifyStream = new TextEncoder().encode(
+    [
+      'event: response.output_item.added',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_verify","name":"verify_read_access","arguments":""}}',
+      '',
+      'event: response.function_call_arguments.done',
+      'data: {"type":"response.function_call_arguments.done","item":{"type":"function_call","call_id":"call_verify","name":"verify_read_access","arguments":"{\\"mobile_last_4\\":\\"3210\\",\\"date_of_birth\\":\\"1991-08-14\\"}"}}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed"}',
+      '',
+    ].join('\n'),
+  );
+  const checkingStream = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"[neutral] Ab main aapki account details check karti hoon."}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed"}',
+      '',
+    ].join('\n'),
+  );
+  const answerStream = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai."}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed"}',
+      '',
+    ].join('\n'),
+  );
+  const requestBodies: unknown[] = [];
+
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    const encoded = requestBodies.length === 1 ? verifyStream : requestBodies.length === 2 ? checkingStream : answerStream;
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoded);
+          controller.close();
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
+  process.env.STABLE_DISABLE_AI_DOB = '1';
+
+  try {
+    const chunks: string[] = [];
+    const result = await streamStableAgentText(
+      {
+        persona,
+        transcript: '9 November 1995',
+        history: [
+          { role: 'user', text: 'Meri FD summary batao' },
+          { role: 'model', text: '[neutral] Account details ke liye mobile last four batayein.' },
+          { role: 'user', text: '3210' },
+          { role: 'model', text: '[neutral] Mobile verification complete ho gaya. Ab date of birth bataiye.' },
+        ],
+        route: testRoute('fd.summary'),
+        toolContext: { verifiedMobileLast4: '3210' },
+      },
+      (delta) => chunks.push(delta),
+    );
+
+    assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_fd_summary']);
+    assert.equal(result.text, '[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.');
+    assert.deepEqual(chunks, [result.text]);
+    assert.match(JSON.stringify(requestBodies.at(-1)), /get_fd_summary/);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -2069,18 +2212,29 @@ test('streamStableAgentText executes streamed verification tool even when call i
       '',
     ].join('\n'),
   );
+  const verifyAnswerStream = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"[neutral] Mobile last four match ho gaya. Apni date of birth batayein."}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed"}',
+      '',
+    ].join('\n'),
+  );
   const requestBodies: unknown[] = [];
 
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
     requestBodies.push(body);
     if (body.stream) {
+      const encoded = requestBodies.length === 1 ? verifyStream : verifyAnswerStream;
       return {
         ok: true,
         status: 200,
         body: new ReadableStream({
           start(controller) {
-            controller.enqueue(verifyStream);
+            controller.enqueue(encoded);
             controller.close();
           },
         }),
@@ -2116,7 +2270,7 @@ test('streamStableAgentText executes streamed verification tool even when call i
     assert.deepEqual(result.toolCalls, ['verify_read_access']);
     assert.equal(result.verified, false);
     assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. Apni date of birth batayein.']);
-    assert.equal(requestBodies.length, 1);
+    assert.equal(requestBodies.length, 3);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -2214,7 +2368,7 @@ test('streamStableAgentText handles streamed OpenAI tool calls without restartin
   }
 });
 
-test('streamStableAgentText streams deterministic reassurance before payment tool summaries', async () => {
+test('streamStableAgentText streams AI-composed payment tool answers', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -2235,17 +2389,35 @@ test('streamStableAgentText streams deterministic reassurance before payment too
       '',
     ].join('\n'),
   );
+  const secondStream = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"[neutral] Main samajh sakti hoon ki aap pareshan hain. "} ',
+      '',
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"PAY-8831 payment pending reconciliation mein hai."}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed"}',
+      '',
+    ].join('\n'),
+  );
+  const requestBodies: unknown[] = [];
 
-  globalThis.fetch = (async () => ({
-    ok: true,
-    status: 200,
-    body: new ReadableStream({
-      start(controller) {
-        controller.enqueue(firstStream);
-        controller.close();
-      },
-    }),
-  }) as Response) as typeof fetch;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    const encoded = requestBodies.length === 1 ? firstStream : secondStream;
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoded);
+          controller.close();
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
 
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
@@ -2266,10 +2438,9 @@ test('streamStableAgentText streams deterministic reassurance before payment too
     assert.deepEqual(result.toolCalls, ['get_payment_reconciliation_status']);
     assert.equal(result.verified, true);
     assert.equal(chunks.join(''), result.text);
-    assert.match(
-      result.text,
-      /^\[neutral\] Main samajh sakti hoon ki aap pareshan hain\. Main abhi status check karke batati hoon\. PAY-8831/,
-    );
+    assert.equal(result.text, '[neutral] Main samajh sakti hoon ki aap pareshan hain. PAY-8831 payment pending reconciliation mein hai.');
+    assert.equal(requestBodies.length, 2);
+    assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output/);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
