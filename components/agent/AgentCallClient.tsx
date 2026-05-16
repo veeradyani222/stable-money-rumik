@@ -17,7 +17,7 @@ import {
 } from '@/lib/voice/agent-audio';
 import { normalizeOpenAITranscript } from '@/lib/voice/transcript-text';
 import { createRumikChunkBuffer, flushRumikChunkBuffer, pushRumikTextDelta } from '@/lib/voice/rumik-streaming';
-import { normalizeRumikText } from '@/lib/voice/rumik-text';
+import { extractRumikStartingTone, normalizeRumikText, type RumikTone } from '@/lib/voice/rumik-text';
 
 type CallState = VoiceCallState;
 type PanelTab = 'persona' | 'questions' | 'changePersona';
@@ -759,6 +759,7 @@ export function AgentCallClient() {
   const pendingRumikRequestsRef = useRef(0);
   const pendingRumikSourcesRef = useRef(0);
   const rumikStreamDoneRef = useRef(false);
+  const rumikToneRef = useRef<RumikTone>('neutral');
   const realtimePeerRef = useRef<RTCPeerConnection | null>(null);
   const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
   const realtimeReconnectTimerRef = useRef<number | null>(null);
@@ -1044,6 +1045,7 @@ export function AgentCallClient() {
     pendingRumikRequestsRef.current = 0;
     pendingRumikSourcesRef.current = 0;
     rumikStreamDoneRef.current = true;
+    rumikToneRef.current = 'neutral';
     rumikDoneRef.current?.();
     rumikDoneRef.current = null;
     sourcesRef.current.forEach((source) => {
@@ -1529,7 +1531,9 @@ export function AgentCallClient() {
       const socket = await ensureRumikSocket(text);
       if (playbackId !== rumikPlaybackIdRef.current) return;
 
-      const packet = { text: normalizeRumikText(text).slice(0, 2000), speaker_id: 0 };
+      const normalizedText = normalizeRumikText(text, resetPlayback ? 'neutral' : rumikToneRef.current);
+      rumikToneRef.current = extractRumikStartingTone(normalizedText) ?? rumikToneRef.current;
+      const packet = { text: normalizedText.slice(0, 2000), speaker_id: 0 };
       pendingRumikRequestsRef.current += 1;
       rumikStreamDoneRef.current = false;
       if (options.timingLabel === 'answer') {

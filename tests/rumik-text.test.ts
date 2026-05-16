@@ -27,3 +27,8 @@ test('normalizeRumikText strips unsupported and incompatible event tags', () => 
     '[neutral] Aapka FD active hai. Details screen par dikh rahi hain.',
   );
 });
+
+test('normalizeRumikText can keep a prior tone across continuation chunks', () => {
+  assert.equal(normalizeRumikText('please wait kijiye.', 'happy'), '[happy] please wait kijiye.');
+  assert.equal(normalizeRumikText('[General] please wait kijiye.', 'happy'), '[happy] please wait kijiye.');
+});
