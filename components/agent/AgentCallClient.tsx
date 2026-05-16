@@ -101,6 +101,7 @@ const AGENT_CLIENT_HISTORY_LIMIT = 16;
 /** Ringtones: MP3 only, from `public/assets/` → `/assets/…` */
 const INCOMING_RINGTONE_SRC = '/assets/ringtone.mp3';
 const OUTGOING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
+const STATIC_RUMIK_OPENING_SRC = '/assets/audio/rumik-opening.wav';
 
 const openingAudioCache: OpeningAudioCache = {
   status: 'idle',
@@ -265,6 +266,33 @@ function isInterruptibleTranscript(utterance: string): boolean {
   if (/^\d{4}$/.test(digits)) return true;
   const words = utterance.trim().split(/\s+/).filter(Boolean);
   return words.length >= 3;
+}
+
+function normalizeRealtimeEchoText(text: string): string {
+  return text
+    .replace(/\[[^\]]+\]/g, ' ')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function isLikelyStaticOpeningEcho(utterance: string): boolean {
+  const spoken = normalizeRealtimeEchoText(utterance);
+  if (spoken.length < 8) return false;
+
+  const opening = normalizeRealtimeEchoText(STABLE_DEFAULT_OPENING);
+  return opening.includes(spoken) || spoken.includes(opening);
+}
+
+function shouldBargeInOnRealtimeSpeechStart(input: {
+  responding: boolean;
+  callState: CallState;
+  staticOpeningPlaying: boolean;
+}): boolean {
+  if (input.staticOpeningPlaying) return false;
+  return input.responding || input.callState === 'thinking' || input.callState === 'speaking';
 }
 
 function parseAgentStreamBlock(block: string): AgentStreamMessage | null {
@@ -681,6 +709,8 @@ export function AgentCallClient() {
   const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
   const rumikSpeakingRef = useRef(false);
   const rumikPlaybackIdRef = useRef(0);
+  const staticOpeningAudioRef = useRef<HTMLAudioElement | null>(null);
+  const staticOpeningFinishRef = useRef<(() => void) | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const scheduledAtRef = useRef(0);
   const sourcesRef = useRef<AudioBufferSourceNode[]>([]);
@@ -942,6 +972,10 @@ export function AgentCallClient() {
   const stopRumikAudio = useCallback(() => {
     logVoiceDebug('rumik:playback:stop', { activeSources: sourcesRef.current.length });
     rumikPlaybackIdRef.current += 1;
+    staticOpeningAudioRef.current?.pause();
+    staticOpeningFinishRef.current?.();
+    staticOpeningFinishRef.current = null;
+    staticOpeningAudioRef.current = null;
     rumikSpeakingRef.current = false;
     pendingRumikRequestsRef.current = 0;
     pendingRumikSourcesRef.current = 0;
@@ -969,7 +1003,14 @@ export function AgentCallClient() {
       socket.close();
     } else if (socket?.readyState === WebSocket.CONNECTING) {
       logVoiceDebug('rumik:close:connecting');
-      socket.close();
+      const socketToClose = socket;
+      socketToClose.addEventListener(
+        'open',
+        () => {
+          socketToClose.close();
+        },
+        { once: true },
+      );
     }
     rumikRef.current = null;
     rumikReadyRef.current = null;
@@ -1503,7 +1544,60 @@ export function AgentCallClient() {
     }
   }, [appendTranscript, playCachedAudioChunks, playRumikText]);
 
+  const playStaticOpeningAudio = useCallback(async (): Promise<boolean> => {
+    if (typeof Audio === 'undefined' || isInactiveCallState(callStateRef.current)) return false;
+
+    stopRumikAudio();
+    const playbackId = rumikPlaybackIdRef.current;
+    const audio = new Audio(STATIC_RUMIK_OPENING_SRC);
+    staticOpeningAudioRef.current = audio;
+    audio.preload = 'auto';
+    audio.setAttribute('playsInline', '');
+
+    setIsListening(false);
+    callStateRef.current = 'speaking';
+    setCallState('speaking');
+    rumikSpeakingRef.current = true;
+
+    const finished = new Promise<boolean>((resolve) => {
+      const cleanup = (played: boolean) => {
+        if (staticOpeningAudioRef.current === audio) staticOpeningAudioRef.current = null;
+        if (staticOpeningFinishRef.current === finishInterruptedPlayback) staticOpeningFinishRef.current = null;
+        rumikSpeakingRef.current = false;
+        if (playbackId === rumikPlaybackIdRef.current && !isInactiveCallState(callStateRef.current)) {
+          callStateRef.current = 'connected';
+          setCallState('connected');
+        }
+        resolve(played);
+      };
+      const finishInterruptedPlayback = () => cleanup(true);
+
+      audio.onended = () => cleanup(true);
+      audio.onerror = () => cleanup(false);
+      staticOpeningFinishRef.current = finishInterruptedPlayback;
+    });
+
+    try {
+      await audio.play();
+    } catch (playError) {
+      if (staticOpeningAudioRef.current === audio) staticOpeningAudioRef.current = null;
+      if (staticOpeningFinishRef.current) staticOpeningFinishRef.current = null;
+      rumikSpeakingRef.current = false;
+      logVoiceDebug('rumik:opening-static:play-failed', {
+        src: STATIC_RUMIK_OPENING_SRC,
+        message: playError instanceof Error ? playError.message : 'unknown',
+      });
+      return false;
+    }
+
+    const played = await finished;
+    if (!played) logVoiceDebug('rumik:opening-static:error', { src: STATIC_RUMIK_OPENING_SRC });
+    return played;
+  }, [stopRumikAudio]);
+
   const playOpeningAudio = useCallback(async () => {
+    if (isInactiveCallState(callStateRef.current)) return;
+    if (await playStaticOpeningAudio()) return;
     if (isInactiveCallState(callStateRef.current)) return;
     if (await playCachedOpeningAudio()) return;
     if (isInactiveCallState(callStateRef.current)) return;
@@ -1511,7 +1605,7 @@ export function AgentCallClient() {
       void prefetchOpeningAudio();
     }
     await playRumikText(STABLE_DEFAULT_OPENING, { trimLeadingSilence: false });
-  }, [playCachedOpeningAudio, playRumikText]);
+  }, [playCachedOpeningAudio, playRumikText, playStaticOpeningAudio]);
 
   const endCall = useCallback(() => {
     logVoiceDebug('call:end');
@@ -1639,7 +1733,7 @@ export function AgentCallClient() {
               await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
               return;
             }
-            await playRumikText(chunk, { resetPlayback: true, waitForCompletion: false, timingLabel: 'answer' });
+            await playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
           });
         };
 
@@ -1794,10 +1888,11 @@ export function AgentCallClient() {
           const realtimeEvent = JSON.parse(String(event.data)) as OpenAIRealtimeTranscriptEvent;
           if (realtimeEvent.type === 'input_audio_buffer.speech_started') {
             setUserVoiceVisual(true);
-            const shouldBargeIn =
-              respondingRef.current ||
-              callStateRef.current === 'thinking' ||
-              callStateRef.current === 'speaking';
+            const shouldBargeIn = shouldBargeInOnRealtimeSpeechStart({
+              responding: respondingRef.current,
+              callState: callStateRef.current,
+              staticOpeningPlaying: staticOpeningAudioRef.current !== null,
+            });
             if (shouldBargeIn) {
               performRealtimeBargeIn('server-vad-speech-start');
             } else {
@@ -1828,6 +1923,15 @@ export function AgentCallClient() {
           setInterimText('');
           if (utterance.length >= 2) {
             if (!isInterruptibleTranscript(utterance)) return;
+            if (staticOpeningAudioRef.current && isLikelyStaticOpeningEcho(utterance)) {
+              logVoiceDebug('realtime:transcript:static-opening-echo', {
+                transcriptChars: utterance.length,
+              });
+              return;
+            }
+            if (respondingRef.current || callStateRef.current === 'thinking' || callStateRef.current === 'speaking') {
+              performRealtimeBargeIn('realtime-transcript-completed');
+            }
             void askAgent(utterance);
           }
         } catch (realtimeError) {

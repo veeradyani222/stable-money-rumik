@@ -219,9 +219,93 @@ test('agent call client prefers cached opening playback instead of regenerating 
   assert.doesNotMatch(clientSource, /warmRumikSocket\(STABLE_DEFAULT_OPENING\)/);
 });
 
+test('agent call client prefers the static Rumik opening asset before generated opening audio', () => {
+  const srcIndex = clientSource.indexOf("const STATIC_RUMIK_OPENING_SRC = '/assets/audio/rumik-opening.wav';");
+  const playOpeningIndex = clientSource.indexOf('const playOpeningAudio = useCallback');
+  const staticIndex = clientSource.indexOf('await playStaticOpeningAudio()', playOpeningIndex);
+  const cachedIndex = clientSource.indexOf('await playCachedOpeningAudio()', playOpeningIndex);
+  const generatedIndex = clientSource.indexOf('await playRumikText(STABLE_DEFAULT_OPENING', playOpeningIndex);
+
+  assert.notEqual(srcIndex, -1);
+  assert.notEqual(playOpeningIndex, -1);
+  assert.notEqual(staticIndex, -1);
+  assert.notEqual(cachedIndex, -1);
+  assert.notEqual(generatedIndex, -1);
+  assert.ok(staticIndex < cachedIndex);
+  assert.ok(cachedIndex < generatedIndex);
+});
+
+test('agent call client stops static opening audio during assistant stop paths', () => {
+  const refIndex = clientSource.indexOf('const staticOpeningAudioRef = useRef<HTMLAudioElement | null>(null);');
+  const finishRefIndex = clientSource.indexOf('const staticOpeningFinishRef = useRef<(() => void) | null>(null);');
+  const stopIndex = clientSource.indexOf('const stopRumikAudio = useCallback');
+  const pauseIndex = clientSource.indexOf('staticOpeningAudioRef.current?.pause();', stopIndex);
+  const finishIndex = clientSource.indexOf('staticOpeningFinishRef.current?.();', pauseIndex);
+  const clearIndex = clientSource.indexOf('staticOpeningAudioRef.current = null;', finishIndex);
+
+  assert.notEqual(refIndex, -1);
+  assert.notEqual(finishRefIndex, -1);
+  assert.notEqual(stopIndex, -1);
+  assert.notEqual(pauseIndex, -1);
+  assert.notEqual(finishIndex, -1);
+  assert.notEqual(clearIndex, -1);
+  assert.ok(stopIndex < pauseIndex);
+  assert.ok(pauseIndex < finishIndex);
+  assert.ok(finishIndex < clearIndex);
+});
+
+test('agent call client does not barge in on raw server VAD while the static opener is playing', () => {
+  const helperIndex = clientSource.indexOf('function shouldBargeInOnRealtimeSpeechStart');
+  const staticGuardIndex = clientSource.indexOf('if (input.staticOpeningPlaying) return false;', helperIndex);
+  const speechStartedIndex = clientSource.indexOf("realtimeEvent.type === 'input_audio_buffer.speech_started'");
+  const shouldBargeIndex = clientSource.indexOf('shouldBargeInOnRealtimeSpeechStart({', speechStartedIndex);
+  const staticInputIndex = clientSource.indexOf('staticOpeningPlaying: staticOpeningAudioRef.current !== null', shouldBargeIndex);
+
+  assert.notEqual(helperIndex, -1);
+  assert.notEqual(staticGuardIndex, -1);
+  assert.notEqual(speechStartedIndex, -1);
+  assert.notEqual(shouldBargeIndex, -1);
+  assert.notEqual(staticInputIndex, -1);
+  assert.ok(helperIndex < speechStartedIndex);
+  assert.ok(speechStartedIndex < shouldBargeIndex);
+});
+
+test('agent call client filters static opener echo before accepting realtime transcript interruptions', () => {
+  const echoHelperIndex = clientSource.indexOf('function isLikelyStaticOpeningEcho');
+  const transcriptIndex = clientSource.indexOf('const utterance = getRealtimeTranscript(realtimeEvent);');
+  const echoGateIndex = clientSource.indexOf('isLikelyStaticOpeningEcho(utterance)', transcriptIndex);
+  const transcriptBargeIndex = clientSource.indexOf("performRealtimeBargeIn('realtime-transcript-completed')", echoGateIndex);
+  const askIndex = clientSource.indexOf('void askAgent(utterance);', transcriptBargeIndex);
+
+  assert.notEqual(echoHelperIndex, -1);
+  assert.notEqual(transcriptIndex, -1);
+  assert.notEqual(echoGateIndex, -1);
+  assert.notEqual(transcriptBargeIndex, -1);
+  assert.notEqual(askIndex, -1);
+  assert.ok(echoHelperIndex < transcriptIndex);
+  assert.ok(echoGateIndex < transcriptBargeIndex);
+  assert.ok(transcriptBargeIndex < askIndex);
+});
+
+test('agent call client defers closing connecting Rumik sockets until open', () => {
+  const closeSocketIndex = clientSource.indexOf('const closeRumikSocket = useCallback');
+  const connectingIndex = clientSource.indexOf('socket?.readyState === WebSocket.CONNECTING', closeSocketIndex);
+  const deferIndex = clientSource.indexOf('socketToClose.addEventListener(', connectingIndex);
+  const openEventIndex = clientSource.indexOf("'open'", deferIndex);
+  const closeIndex = clientSource.indexOf('socketToClose.close();', deferIndex);
+  const connectingBlock = clientSource.slice(connectingIndex, closeIndex);
+
+  assert.notEqual(closeSocketIndex, -1);
+  assert.notEqual(connectingIndex, -1);
+  assert.notEqual(deferIndex, -1);
+  assert.notEqual(openEventIndex, -1);
+  assert.notEqual(closeIndex, -1);
+  assert.doesNotMatch(connectingBlock, /socket\.close\(\)/);
+});
+
 test('agent call client does not wait for unfinished opening cache before speaking', () => {
   const playOpeningIndex = clientSource.indexOf('const playOpeningAudio = useCallback');
-  const playOpeningEndIndex = clientSource.indexOf('}, [playCachedOpeningAudio, playRumikText]);', playOpeningIndex);
+  const playOpeningEndIndex = clientSource.indexOf('}, [playCachedOpeningAudio, playRumikText', playOpeningIndex);
   const playOpeningSource = clientSource.slice(playOpeningIndex, playOpeningEndIndex);
 
   assert.notEqual(playOpeningIndex, -1);
@@ -264,7 +348,7 @@ test('agent call client preserves every cached opening audio packet', () => {
 
 test('agent call client preserves every fallback opening audio packet', () => {
   const playOpeningIndex = clientSource.indexOf('const playOpeningAudio = useCallback');
-  const playOpeningEndIndex = clientSource.indexOf('}, [playCachedOpeningAudio, playRumikText]);', playOpeningIndex);
+  const playOpeningEndIndex = clientSource.indexOf('}, [playCachedOpeningAudio, playRumikText', playOpeningIndex);
   const playOpeningSource = clientSource.slice(playOpeningIndex, playOpeningEndIndex);
 
   assert.notEqual(playOpeningIndex, -1);
