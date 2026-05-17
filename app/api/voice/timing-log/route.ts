@@ -21,6 +21,13 @@ export async function POST(request: Request) {
   const payload = body as Record<string, unknown>;
   const event = cleanString(payload.event, MAX_EVENT_CHARS);
   if (!event) return NextResponse.json({ ok: false }, { status: 400 });
+  console.log('[voice-timing]', {
+    event,
+    call_id: cleanString(payload.call_id, 120),
+    turn_id: cleanString(payload.turn_id, 120),
+    elapsedMs: typeof payload.elapsedMs === 'number' ? payload.elapsedMs : null,
+    details: payload.details && typeof payload.details === 'object' ? payload.details : {},
+  });
 
   return NextResponse.json({ ok: true });
 }

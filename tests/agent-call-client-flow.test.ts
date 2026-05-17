@@ -45,35 +45,52 @@ test('agent call client starts opening playback after realtime transcription is 
   assert.ok(realtimeSyncIndex < openingPlaybackIndex);
 });
 
-test('agent call client prefetches fixed opening audio before the call starts', () => {
-  const prefetchIndex = clientSource.indexOf('void prefetchOpeningAudio();');
-  const startCallIndex = clientSource.indexOf('const startCall = useCallback');
-  const prefetchEndIndex = clientSource.indexOf('function prefetchAudioCache', prefetchIndex);
-  const prefetchSource = clientSource.slice(prefetchIndex, prefetchEndIndex);
-
-  assert.match(clientSource, /openingAudioCache/);
-  assert.doesNotMatch(prefetchSource, /socket\?\.send\(JSON\.stringify\(packet\)\)/);
-  assert.notEqual(prefetchIndex, -1);
-  assert.notEqual(startCallIndex, -1);
-  assert.ok(prefetchIndex < startCallIndex);
+test('agent call client does not prefetch generated opening audio', () => {
+  assert.doesNotMatch(clientSource, /prefetchOpeningAudio/);
+  assert.doesNotMatch(clientSource, /openingAudioCache/);
+  assert.doesNotMatch(clientSource, /rumik:opening-cache/);
 });
 
-test('agent call client prefetches randomized thinking filler audio before turns need it', () => {
-  const prefetchIndex = clientSource.indexOf('void prefetchThinkingFillerAudio();');
-  const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
-  const cacheIndex = clientSource.indexOf('function prefetchAudioCache');
-  const cacheEndIndex = clientSource.indexOf('function prefetchThinkingFillerAudio', cacheIndex);
-  const cacheSource = clientSource.slice(cacheIndex, cacheEndIndex);
-
+test('agent call client does not prefetch generated thinking filler audio', () => {
   assert.match(clientSource, /STABLE_THINKING_FILLERS/);
-  assert.match(clientSource, /thinkingFillerAudioCaches/);
-  assert.doesNotMatch(cacheSource, /socket\?\.send\(JSON\.stringify/);
-  assert.notEqual(prefetchIndex, -1);
-  assert.notEqual(askAgentIndex, -1);
-  assert.ok(prefetchIndex < askAgentIndex);
+  assert.doesNotMatch(clientSource, /prefetchThinkingFillerAudio/);
+  assert.doesNotMatch(clientSource, /prefetchAudioCache/);
+  assert.doesNotMatch(clientSource, /thinkingFillerAudioCaches/);
+  assert.doesNotMatch(clientSource, /rumik:thinking-filler-cache/);
 });
 
-test('cached thinking fillers are unique stable copy variants', () => {
+test('agent call client uses static thinking filler assets before live Rumik fallback', () => {
+  const srcIndex = clientSource.indexOf('const STATIC_RUMIK_FILLER_SRCS = [');
+  const playStaticIndex = clientSource.indexOf('const playStaticThinkingFillerAudio = useCallback');
+  const playFillerIndex = clientSource.indexOf('const playThinkingFillerAudio = useCallback');
+  const staticAttemptIndex = clientSource.indexOf('await playStaticThinkingFillerAudio(selectedIndex)', playFillerIndex);
+  const liveAttemptIndex = clientSource.indexOf('await playRumikText(text, { trimLeadingSilence: false })', playFillerIndex);
+
+  assert.notEqual(srcIndex, -1);
+  assert.notEqual(playStaticIndex, -1);
+  assert.notEqual(playFillerIndex, -1);
+  assert.notEqual(staticAttemptIndex, -1);
+  assert.notEqual(liveAttemptIndex, -1);
+  assert.ok(playStaticIndex < playFillerIndex);
+  assert.ok(staticAttemptIndex < liveAttemptIndex);
+  assert.doesNotMatch(clientSource.slice(playFillerIndex, liveAttemptIndex), /playCachedAudioChunks/);
+});
+
+test('static thinking filler assets exist as 24 kHz mono PCM WAV files', () => {
+  for (let index = 1; index <= 6; index += 1) {
+    const assetPath = path.join(process.cwd(), 'public', 'assets', 'audio', `rumik-filler-${index}.wav`);
+    const bytes = fs.readFileSync(assetPath);
+
+    assert.equal(Buffer.from(bytes.subarray(0, 4)).toString('ascii'), 'RIFF');
+    assert.equal(Buffer.from(bytes.subarray(8, 12)).toString('ascii'), 'WAVE');
+    assert.equal(bytes.readUInt16LE(22), 1);
+    assert.equal(bytes.readUInt32LE(24), 24000);
+    assert.equal(bytes.readUInt16LE(34), 16);
+    assert.ok(bytes.length > 44);
+  }
+});
+
+test('static thinking fillers are unique stable copy variants', () => {
   const fillerBlockMatch = clientSource.match(/const STABLE_THINKING_FILLERS = \[([\s\S]*?)\] as const;/);
   assert.ok(fillerBlockMatch);
   const fillers = [...fillerBlockMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
@@ -121,7 +138,7 @@ test('respond stream sends server agent timing milestones over SSE without conso
   assert.match(openAiAgentSource, /agent_finish/);
 });
 
-test('agent call client starts cached thinking filler immediately after the agent stream request', () => {
+test('agent call client starts static thinking filler immediately after the agent stream request', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
   const fetchIndex = clientSource.indexOf("fetch('/api/agent/respond-stream'", askAgentIndex);
   const fillerIndex = clientSource.indexOf('const thinkingFillerPlayback = playThinkingFillerAudio()', fetchIndex);
@@ -212,27 +229,25 @@ test('agent call client queues fallback answers before waiting for the thinking 
   assert.doesNotMatch(fallbackSource, /await thinkingFillerPlayback;/);
 });
 
-test('agent call client prefers cached opening playback instead of regenerating it on start', () => {
-  assert.match(clientSource, /playCachedOpeningAudio/);
+test('agent call client starts the opening playback without warming generated audio', () => {
   assert.match(clientSource, /const openingPlayback = playOpeningAudio\(\)/);
   assert.match(clientSource, /await openingPlayback/);
   assert.doesNotMatch(clientSource, /warmRumikSocket\(STABLE_DEFAULT_OPENING\)/);
+  assert.doesNotMatch(clientSource, /playCachedOpeningAudio/);
 });
 
-test('agent call client prefers the static Rumik opening asset before generated opening audio', () => {
+test('agent call client uses the static Rumik opening asset before live Rumik fallback', () => {
   const srcIndex = clientSource.indexOf("const STATIC_RUMIK_OPENING_SRC = '/assets/audio/rumik-opening.wav';");
   const playOpeningIndex = clientSource.indexOf('const playOpeningAudio = useCallback');
   const staticIndex = clientSource.indexOf('await playStaticOpeningAudio()', playOpeningIndex);
-  const cachedIndex = clientSource.indexOf('await playCachedOpeningAudio()', playOpeningIndex);
   const generatedIndex = clientSource.indexOf('await playRumikText(STABLE_DEFAULT_OPENING', playOpeningIndex);
 
   assert.notEqual(srcIndex, -1);
   assert.notEqual(playOpeningIndex, -1);
   assert.notEqual(staticIndex, -1);
-  assert.notEqual(cachedIndex, -1);
   assert.notEqual(generatedIndex, -1);
-  assert.ok(staticIndex < cachedIndex);
-  assert.ok(cachedIndex < generatedIndex);
+  assert.ok(staticIndex < generatedIndex);
+  assert.doesNotMatch(clientSource.slice(playOpeningIndex, generatedIndex), /playCachedOpeningAudio/);
 });
 
 test('agent call client stops static opening audio during assistant stop paths', () => {
@@ -327,52 +342,21 @@ test('agent call client defers closing connecting Rumik sockets until open', () 
   assert.doesNotMatch(connectingBlock, /socket\.close\(\)/);
 });
 
-test('agent call client does not wait for unfinished opening cache before speaking', () => {
+test('agent call client does not wait for generated opening cache before speaking', () => {
   const playOpeningIndex = clientSource.indexOf('const playOpeningAudio = useCallback');
-  const playOpeningEndIndex = clientSource.indexOf('}, [playCachedOpeningAudio, playRumikText', playOpeningIndex);
+  const playOpeningEndIndex = clientSource.indexOf('}, [playRumikText, playStaticOpeningAudio]', playOpeningIndex);
   const playOpeningSource = clientSource.slice(playOpeningIndex, playOpeningEndIndex);
 
   assert.notEqual(playOpeningIndex, -1);
   assert.notEqual(playOpeningEndIndex, -1);
   assert.doesNotMatch(playOpeningSource, /await prefetchOpeningAudio\(\)/);
-  assert.match(playOpeningSource, /if \(await playCachedOpeningAudio\(\)\) return;/);
+  assert.doesNotMatch(playOpeningSource, /playCachedOpeningAudio/);
   assert.match(playOpeningSource, /await playRumikText\(STABLE_DEFAULT_OPENING/);
-});
-
-test('agent call client can play opening cache while it is still loading', () => {
-  assert.match(clientSource, /openingAudioCache\.waiters/);
-  assert.match(clientSource, /openingAudioCache\.chunks\.length < 1/);
-  assert.doesNotMatch(clientSource, /openingAudioCache\.status !== 'ready' \|\| openingAudioCache\.chunks\.length < 1/);
-});
-
-test('agent call client refreshes the opening cache timeout while audio is arriving', () => {
-  const prefetchIndex = clientSource.indexOf('function prefetchOpeningAudio');
-  const prefetchEndIndex = clientSource.indexOf('function prefetchAudioCache', prefetchIndex);
-  const prefetchSource = clientSource.slice(prefetchIndex, prefetchEndIndex);
-
-  assert.notEqual(prefetchIndex, -1);
-  assert.notEqual(prefetchEndIndex, -1);
-  assert.match(prefetchSource, /const refreshOpeningCacheTimeout = \(\) =>/);
-  assert.match(prefetchSource, /refreshOpeningCacheTimeout\(\);[\s\S]*socket = new WebSocket/);
-  assert.match(prefetchSource, /textPackets \+= 1;[\s\S]*refreshOpeningCacheTimeout\(\);/);
-  assert.match(prefetchSource, /binaryPackets \+= 1;[\s\S]*refreshOpeningCacheTimeout\(\);/);
-  assert.match(prefetchSource, /rumik:opening-cache:timeout/);
-});
-
-test('agent call client preserves every cached opening audio packet', () => {
-  const playCachedOpeningIndex = clientSource.indexOf('const playCachedOpeningAudio = useCallback');
-  const playCachedOpeningEndIndex = clientSource.indexOf('}, [stopRumikAudio]);', playCachedOpeningIndex);
-  const playCachedOpeningSource = clientSource.slice(playCachedOpeningIndex, playCachedOpeningEndIndex);
-
-  assert.notEqual(playCachedOpeningIndex, -1);
-  assert.notEqual(playCachedOpeningEndIndex, -1);
-  assert.doesNotMatch(playCachedOpeningSource, /silent-leading-drop/);
-  assert.doesNotMatch(playCachedOpeningSource, /RUMIK_LEADING_SILENCE_RMS_THRESHOLD/);
 });
 
 test('agent call client preserves every fallback opening audio packet', () => {
   const playOpeningIndex = clientSource.indexOf('const playOpeningAudio = useCallback');
-  const playOpeningEndIndex = clientSource.indexOf('}, [playCachedOpeningAudio, playRumikText', playOpeningIndex);
+  const playOpeningEndIndex = clientSource.indexOf('}, [playRumikText, playStaticOpeningAudio]', playOpeningIndex);
   const playOpeningSource = clientSource.slice(playOpeningIndex, playOpeningEndIndex);
 
   assert.notEqual(playOpeningIndex, -1);
@@ -465,6 +449,15 @@ test('agent call client waits for scheduled Rumik audio before returning to list
   assert.match(clientSource, /finishRumikPlaybackTurn/);
   assert.match(clientSource, /rumik:message:text:done-waiting-playback/);
   assert.doesNotMatch(clientSource, /message\.type === 'done'[\s\S]{0,220}setCallState\('connected'\)/);
+});
+
+test('agent call client retries stalled Rumik TTS text sends once', () => {
+  assert.match(clientSource, /RUMIK_TTS_FIRST_AUDIO_TIMEOUT_MS/);
+  assert.match(clientSource, /RUMIK_TTS_MAX_SEND_RETRIES/);
+  assert.match(clientSource, /pendingRumikRequestQueueRef/);
+  assert.match(clientSource, /scheduleFirstAudioWatchdog/);
+  assert.match(clientSource, /rumik:send:first-audio-timeout:retry/);
+  assert.match(clientSource, /rumik:send:first-audio-timeout:give-up/);
 });
 
 test('agent call client speaks final done-only answers from tool-backed responses', () => {

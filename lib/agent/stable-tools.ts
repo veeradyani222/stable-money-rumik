@@ -874,9 +874,12 @@ async function legacyDobVerification(persona: PersonaSeed, args: Record<string, 
 
 function paymentSummary(payment: PaymentSeed): string {
   const status = spokenStatus(payment.status);
-  const eta = rumikTimeline(payment.eta, 'Abhi koi pending timeline attached nahi hai.');
+  const eta =
+    payment.status === 'pending_reconciliation'
+      ? 'Timeline usually within 5 working days hai.'
+      : rumikTimeline(payment.eta, 'Abhi koi pending timeline attached nahi hai.');
   if (payment.status === 'pending_reconciliation') {
-    return `[neutral] ${payment.payment_reference} ${payment.source_bank} se ${formatRumikInr(payment.amount)} ka payment ${status} mein hai. ${PROJECT_EXACT_LINES.paymentSafe} aur ${PROJECT_EXACT_LINES.paymentWorstCase}. ${eta}`;
+    return `[neutral] ${payment.payment_reference} ${payment.source_bank} se ${formatRumikInr(payment.amount)} ka payment ${status} mein hai. ${eta}`;
   }
 
   return `[neutral] ${payment.payment_reference} ${payment.source_bank} se ${formatRumikInr(payment.amount)} ka payment ${status} hai. ${eta}`;
@@ -897,7 +900,7 @@ function executePaymentLookup(persona: PersonaSeed, args: Record<string, unknown
   if (matches.length === 0 && persona.payments.length > 1) {
     return {
       ok: false,
-      summary: `[neutral] Kaunsa payment check karna hai? Payment reference, UTR, ya amount batayein. Available payments hain ${persona.payments.map(paymentChoice).join(', ')}.`,
+      summary: '[neutral] Kaunsa payment check karna hai? Amount ya bank bata dijiye.',
       data: {
         state: 'clarification_required',
         match_count: persona.payments.length,
@@ -949,7 +952,7 @@ function executePaymentSummary(persona: PersonaSeed): StableToolResult {
 
   return {
     ok: true,
-    summary: joinRumikSummaries(persona.payments.map(paymentSummary)),
+    summary: '[neutral] Payment records available hain.',
     data: {
       intent_id: 'payment.summary',
       payments: persona.payments,
@@ -989,7 +992,7 @@ function executeFdLookup(persona: PersonaSeed, args: Record<string, unknown>): S
   if (matches.length === 0 && persona.fixed_deposits.length > 1) {
     return {
       ok: false,
-      summary: `[neutral] Kaunsi FD check karni hai? FD code, bank name, ya amount batayein. Available FDs hain ${persona.fixed_deposits.map(fdChoice).join(', ')}.`,
+      summary: '[neutral] Kaunsi FD check karni hai? FD code, bank, ya amount bata dijiye.',
       data: {
         state: 'clarification_required',
         match_count: persona.fixed_deposits.length,
@@ -1042,7 +1045,7 @@ function executeFdSummary(persona: PersonaSeed): StableToolResult {
 
   return {
     ok: true,
-    summary: joinRumikSummaries(persona.fixed_deposits.map(fdSummary)),
+    summary: '[neutral] FD records available hain.',
     data: {
       intent_id: 'fd.summary',
       fixed_deposits: persona.fixed_deposits,
@@ -1071,7 +1074,7 @@ function executePrematureWithdrawalQuote(persona: PersonaSeed, args: Record<stri
   if (matches.length === 0 && quoteCandidates.length > 1) {
     return {
       ok: false,
-      summary: `[neutral] Premature withdrawal quote ke liye kaunsi FD check karni hai? Available FDs hain ${quoteCandidates.map(fdChoice).join(', ')}.`,
+      summary: '[neutral] Premature withdrawal quote ke liye kaunsi FD check karni hai? FD code, bank, ya amount bata dijiye.',
       data: {
         state: 'clarification_required',
         match_count: quoteCandidates.length,
@@ -1113,13 +1116,13 @@ function executeSecureLink(persona: PersonaSeed, args: Record<string, unknown>):
   if (!link) {
     return {
       ok: false,
-      summary: '[neutral] Is action ke liye ready secure link available nahi hai. Main support ticket create kar sakti hoon.',
+      summary: '[neutral] Is action ke liye ready secure link available nahi hai.',
       data: { state: 'not_found' },
     };
   }
   return {
     ok: true,
-    summary: `[neutral] ${spokenStatus(link.action)} ke liye secure link bheja ja sakta hai${link.fd_id ? `, ${link.fd_id} ke liye` : ''}. Yeh sirf link prepare karta hai, voice par action execute nahi hota.`,
+    summary: `[neutral] ${spokenStatus(link.action)} ke liye secure link ready hai${link.fd_id ? `, ${link.fd_id} ke liye` : ''}.`,
     data: {
       ...link,
       voice_execution_allowed: false,
@@ -1155,7 +1158,7 @@ function executeFdRates(args: Record<string, unknown>): StableToolResult {
 
   return {
     ok: true,
-    summary: `[neutral] Main rates compare kar sakti hoon, lekin ek specific FD recommend nahi kar sakti. Current demo rate card mein senior citizen differential bhi available hai.`,
+    summary: '[neutral] FD rates available hain. Main rates compare kar sakti hoon, lekin ek specific FD recommend nahi kar sakti.',
     data: {
       intent_id: 'fd.rates.compare',
       state: rates.length > 0 ? 'available' : 'not_found',
@@ -1198,7 +1201,7 @@ function executeSupportTicket(persona: PersonaSeed, args: Record<string, unknown
 
   return {
     ok: true,
-    summary: `[neutral] Support ticket ${ticketId} prepare ho gaya. Issue hai ${issue}. Priority ${priority} hai. Human support 10 AM se 7 PM IST, Monday to Saturday available hai.`,
+    summary: `[neutral] Support ticket ${ticketId} prepare ho gaya.`,
     data: {
       ticket_id: ticketId,
       issue,

@@ -120,7 +120,7 @@ test('buildOpenAIResponseRequest gives explicit Tier B verification instructions
   assert.doesNotMatch(request.instructions, /This current turn is Tier B, so verify read access/i);
 });
 
-test('buildOpenAIResponseRequest keeps mobile last-four follow-up on the original account route', () => {
+test('buildOpenAIResponseRequest does not use local last-four regex to expose account tools early', () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -135,8 +135,8 @@ test('buildOpenAIResponseRequest keeps mobile last-four follow-up on the origina
   });
 
   assert.match(request.instructions, /Current turn route: fd\.summary, Tier B/i);
-  assert.match(request.instructions, /Allowed tools: verify_read_access, get_fd_summary/i);
-  assert.match(request.instructions, /When the caller gives last four digits, call verify_read_access/i);
+  assert.deepEqual(request.tools?.map((tool) => tool.name), ['verify_read_access']);
+  assert.match(request.instructions, /Allowed tools: verify_read_access/i);
   assert.match(request.instructions, /After verification, answer the original request using the allowed account tool/i);
 });
 
@@ -371,7 +371,7 @@ test('agent prompt requires issue context before creating a support ticket', () 
   assert.match(request.instructions, /Confirmation email thodi der mein aa jayega/i);
 });
 
-test('agent keeps support ticket creation active after asking what issue the ticket is for', () => {
+test('agent exposes support ticket creation only from the explicit route', () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -382,12 +382,11 @@ test('agent keeps support ticket creation active after asking what issue the tic
       { role: 'user', text: 'Support ticket create kar do' },
       { role: 'model', text: '[neutral] Theek hai, bataiye ticket kis issue ke liye create karu?' },
     ],
-    route: testRoute('kyc.status'),
+    route: testRoute('grievance.escalate'),
   });
 
-  assert.deepEqual(request.tools?.map((tool) => tool.name), ['create_support_ticket']);
-  assert.match(request.instructions, /Caller is answering what issue the support ticket is for/i);
-  assert.match(request.instructions, /Do not switch this turn into a KYC status lookup/i);
+  assert.deepEqual(request.tools?.map((tool) => tool.name), ['create_support_ticket', 'get_support_contact']);
+  assert.match(request.instructions, /Current turn route: grievance\.escalate/i);
 });
 
 test('buildOpenAIResponseRequest keeps verified callers behind tool-only account reads', () => {
@@ -586,6 +585,11 @@ test('buildOpenAIResponseRequest exposes FD summary tool after verification', ()
 
   assert.deepEqual(request.tools?.map((tool) => tool.name), ['get_fd_summary']);
   assert.match(request.instructions, /Call verification status: verified/i);
+  assert.match(request.instructions, /Tool answer contract applies to every tool/i);
+  assert.match(request.instructions, /Answer only the caller's current request/i);
+  assert.match(request.instructions, /Do not add extra follow-up questions/i);
+  assert.match(request.instructions, /unless the tool result requires clarification/i);
+  assert.match(request.instructions, /Do not read raw field labels/i);
 });
 
 test('buildOpenAIResponseRequest exposes account read tools without model-filled lookup args', () => {
@@ -745,12 +749,55 @@ test('runStableAgent executes an OpenAI tool call and sends the tool result back
       persona,
       transcript: 'FD status batao',
       history: [],
+      route: testRoute('fd.book.status'),
     });
 
     assert.equal(result.text, '[neutral] Is account specific tool ke liye pehle read access verification zaroori hai.');
     assert.deepEqual(result.toolCalls, ['get_fd_booking_status']);
     assert.equal(callCount, 1);
     assert.equal(requestBodies.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalApiKey;
+    process.env.OPENAI_AGENT_MODEL = originalModel;
+  }
+});
+
+test('runStableAgent does not infer route or tools with local regex when no route is provided', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalModel = process.env.OPENAI_AGENT_MODEL;
+
+  const requestBodies: unknown[] = [];
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: '[neutral] Thoda aur clear kar dijiye.' }] }],
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
+
+  try {
+    const result = await runStableAgent({
+      persona,
+      transcript: 'FD status batao',
+      history: [],
+    });
+
+    assert.equal(result.text, '[neutral] Thoda aur clear kar dijiye.');
+    assert.deepEqual(result.toolCalls, []);
+    assert.equal(requestBodies.length, 1);
+    const exposedToolNames = ((requestBodies[0] as { tools?: Array<{ name?: string }> }).tools ?? []).map((tool) => tool.name);
+    assert.deepEqual(exposedToolNames, []);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -851,14 +898,7 @@ test('runStableAgent can continue from DOB verification to the original account 
         ok: true,
         status: 200,
         json: async () => ({
-          output: [
-            {
-              type: 'function_call',
-              call_id: 'call_payment',
-              name: 'get_payment_reconciliation_status',
-              arguments: '{"reference":"PAY-8831"}',
-            },
-          ],
+          output: [{ type: 'message', content: [{ type: 'output_text', text: '[neutral] Payment pending reconciliation mein hai.' }] }],
         }),
       } as Response;
     }
@@ -866,9 +906,7 @@ test('runStableAgent can continue from DOB verification to the original account 
     return {
       ok: true,
       status: 200,
-      json: async () => ({
-        output: [{ type: 'message', content: [{ type: 'output_text', text: '[neutral] Payment pending reconciliation mein hai.' }] }],
-      }),
+      json: async () => ({ output: [] }),
     } as Response;
   }) as typeof fetch;
 
@@ -888,14 +926,16 @@ test('runStableAgent can continue from DOB verification to the original account 
       ],
       route: testRoute('payment.failed'),
       skipAiMobileVerification: true,
+      toolContext: { verifiedMobileLast4: '3210' },
     });
 
     assert.equal(result.text, '[neutral] Payment pending reconciliation mein hai.');
     assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_payment_reconciliation_status']);
     assert.equal(result.verified, true);
-    assert.equal(callCount, 3);
-    assert.equal(requestBodies.length, 3);
+    assert.equal(callCount, 2);
+    assert.equal(requestBodies.length, 2);
     assert.match(JSON.stringify(requestBodies.at(-1)), /PAY-8831/);
+    assert.deepEqual((requestBodies.at(-1) as { tools?: unknown[] }).tools, []);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1156,6 +1196,7 @@ test('runStableAgent lets AI compose caller-facing text after account tool calls
     assert.equal(result.verified, true);
     assert.equal(result.text, '[neutral] Aapka KYC pending review hai.');
     assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output/);
+    assert.deepEqual((requestBodies.at(-1) as { tools?: unknown[] }).tools, []);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1279,7 +1320,7 @@ test('runStableAgent uses a no-tool recovery response when OpenAI returns no usa
     assert.equal(result.text, '[neutral] Maaf kijiye, ab main help karti hoon.');
     assert.deepEqual(result.toolCalls, []);
     assert.equal(callCount, 4);
-    assert.equal((requestBodies.at(-1) as { tools?: unknown[] }).tools?.length, 1);
+    assert.equal((requestBodies.at(-1) as { tools?: unknown[] }).tools?.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1506,7 +1547,7 @@ test('runStableAgent stops a repeated tool loop with a no-tool recovery response
 
     assert.equal(result.text, '[neutral] Verification complete hai. Ab KYC status check kar sakti hoon.');
     assert.deepEqual(result.toolCalls, ['verify_read_access']);
-    assert.equal(result.verified, true);
+    assert.equal(result.verified, false);
     assert.equal(callCount, 3);
     assert.equal((requestBodies.at(-1) as { tools?: unknown[] }).tools?.length, 0);
   } finally {
@@ -1943,10 +1984,10 @@ test('streamStableAgentText accepts streamed tool call ids from Responses events
       (delta) => chunks.push(delta),
     );
 
-    assert.equal(streamBodies.length, 2);
+    assert.equal(streamBodies.length, 3);
     assert.deepEqual(result.toolCalls, ['verify_read_access']);
-    assert.equal(result.text, '[neutral] Mobile last four match ho gaya. Kripya date of birth batayein.');
-    assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. Kripya date of birth batayein.']);
+    assert.equal(result.text, '[neutral] Mobile last four match ho gaya. Apni date of birth batayein.');
+    assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. Apni date of birth batayein.']);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -2036,7 +2077,7 @@ test('streamStableAgentText fills empty DOB verification args from the current t
   }
 });
 
-test('streamStableAgentText continues from successful DOB verification to FD summary', async () => {
+test('streamStableAgentText executes pending route tool directly after successful DOB verification', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -2061,19 +2102,6 @@ test('streamStableAgentText continues from successful DOB verification to FD sum
       '',
     ].join('\n'),
   );
-  const fdStream = new TextEncoder().encode(
-    [
-      'event: response.output_item.added',
-      'data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_fd","name":"get_fd_summary","arguments":""},"output_index":0,"sequence_number":0}',
-      '',
-      'event: response.output_item.done',
-      'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_fd","name":"get_fd_summary","arguments":"{}"},"output_index":0,"sequence_number":1}',
-      '',
-      'event: response.completed',
-      'data: {"type":"response.completed","response":{"status":"completed"},"sequence_number":2}',
-      '',
-    ].join('\n'),
-  );
   const answerStream = new TextEncoder().encode(
     [
       'event: response.output_text.delta',
@@ -2090,13 +2118,12 @@ test('streamStableAgentText continues from successful DOB verification to FD sum
     requestBodies.push(JSON.parse(String(init?.body)));
     const body = requestBodies.at(-1) as { stream?: boolean };
     assert.equal(body.stream, true);
-    const encoded = requestBodies.length === 1 ? verifyStream : requestBodies.length === 2 ? fdStream : answerStream;
     return {
       ok: true,
       status: 200,
       body: new ReadableStream({
         start(controller) {
-          controller.enqueue(encoded);
+          controller.enqueue(requestBodies.length === 1 ? verifyStream : answerStream);
           controller.close();
         },
       }),
@@ -2129,8 +2156,9 @@ test('streamStableAgentText continues from successful DOB verification to FD sum
     assert.equal(result.verified, true);
     assert.equal(result.text, '[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.');
     assert.deepEqual(chunks, [result.text]);
-    assert.equal(requestBodies.length, 3);
-    assert.deepEqual((requestBodies[1] as { tools?: Array<{ name: string }> }).tools?.map((tool) => tool.name), ['get_fd_summary']);
+    assert.equal(requestBodies.length, 2);
+    assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output|get_fd_summary/);
+    assert.deepEqual((requestBodies.at(-1) as { tools?: unknown[] }).tools, []);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -2139,7 +2167,7 @@ test('streamStableAgentText continues from successful DOB verification to FD sum
   }
 });
 
-test('streamStableAgentText forces pending account tool after DOB verification instead of stopping at checking copy', async () => {
+test('streamStableAgentText ignores checking copy and speaks pending tool summary after DOB verification', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -2161,23 +2189,13 @@ test('streamStableAgentText forces pending account tool after DOB verification i
       '',
     ].join('\n'),
   );
-  const checkingStream = new TextEncoder().encode(
-    [
-      'event: response.output_text.delta',
-      'data: {"type":"response.output_text.delta","delta":"[neutral] Ab main aapki account details check karti hoon."}',
-      '',
-      'event: response.completed',
-      'data: {"type":"response.completed"}',
-      '',
-    ].join('\n'),
-  );
   const answerStream = new TextEncoder().encode(
     [
       'event: response.output_text.delta',
       'data: {"type":"response.output_text.delta","delta":"[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai."}',
       '',
       'event: response.completed',
-      'data: {"type":"response.completed"}',
+      'data: {"type":"response.completed","response":{"status":"completed"},"sequence_number":0}',
       '',
     ].join('\n'),
   );
@@ -2185,13 +2203,12 @@ test('streamStableAgentText forces pending account tool after DOB verification i
 
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     requestBodies.push(JSON.parse(String(init?.body)));
-    const encoded = requestBodies.length === 1 ? verifyStream : requestBodies.length === 2 ? checkingStream : answerStream;
     return {
       ok: true,
       status: 200,
       body: new ReadableStream({
         start(controller) {
-          controller.enqueue(encoded);
+          controller.enqueue(requestBodies.length === 1 ? verifyStream : answerStream);
           controller.close();
         },
       }),
@@ -2223,7 +2240,9 @@ test('streamStableAgentText forces pending account tool after DOB verification i
     assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_fd_summary']);
     assert.equal(result.text, '[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.');
     assert.deepEqual(chunks, [result.text]);
-    assert.match(JSON.stringify(requestBodies.at(-1)), /get_fd_summary/);
+    assert.equal(requestBodies.length, 2);
+    assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output|get_fd_summary/);
+    assert.deepEqual((requestBodies.at(-1) as { tools?: unknown[] }).tools, []);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -2450,13 +2469,12 @@ test('streamStableAgentText streams AI-composed payment tool answers', async () 
 
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     requestBodies.push(JSON.parse(String(init?.body)));
-    const encoded = requestBodies.length === 1 ? firstStream : secondStream;
     return {
       ok: true,
       status: 200,
       body: new ReadableStream({
         start(controller) {
-          controller.enqueue(encoded);
+          controller.enqueue(requestBodies.length === 1 ? firstStream : secondStream);
           controller.close();
         },
       }),
@@ -2485,6 +2503,7 @@ test('streamStableAgentText streams AI-composed payment tool answers', async () 
     assert.equal(result.text, '[neutral] Main samajh sakti hoon ki aap pareshan hain. PAY-8831 payment pending reconciliation mein hai.');
     assert.equal(requestBodies.length, 2);
     assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output/);
+    assert.deepEqual((requestBodies.at(-1) as { tools?: unknown[] }).tools, []);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;

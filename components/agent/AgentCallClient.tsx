@@ -72,24 +72,24 @@ interface VoiceTimingTurn {
   firstAnswerAudioScheduledLogged: boolean;
 }
 
+interface PendingRumikTtsRequest {
+  id: number;
+  packet: { text: string; speaker_id: number };
+  playbackId: number;
+  retryCount: number;
+  receivedAudio: boolean;
+  timer: number | null;
+}
+
 interface AgentTurnPolicy {
   suppressFiller?: boolean;
   endCallAfterResponse?: boolean;
 }
 
-type OpeningAudioCacheStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-interface OpeningAudioCache {
-  status: OpeningAudioCacheStatus;
-  chunks: ArrayBuffer[];
-  promise: Promise<void> | null;
-  error: string;
-  waiters: Array<() => void>;
-}
-
 const RUMIK_LEADING_SILENCE_RMS_THRESHOLD = 0.004;
 const RUMIK_MAX_LEADING_SILENCE_DROPS = 20;
-const OPENING_AUDIO_CACHE_TIMEOUT_MS = 12000;
+const RUMIK_TTS_FIRST_AUDIO_TIMEOUT_MS = 7000;
+const RUMIK_TTS_MAX_SEND_RETRIES = 1;
 const USE_OPENAI_REALTIME_TRANSCRIPTION = true;
 const STABLE_THINKING_FILLERS = [
  '[neutral] Ek minute, main check karti hoon.',
@@ -104,38 +104,20 @@ const AGENT_CLIENT_HISTORY_LIMIT = 16;
 const INCOMING_RINGTONE_SRC = '/assets/ringtone.mp3';
 const OUTGOING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
 const STATIC_RUMIK_OPENING_SRC = '/assets/audio/rumik-opening.wav';
+const STATIC_RUMIK_FILLER_SRCS = [
+  '/assets/audio/rumik-filler-1.wav',
+  '/assets/audio/rumik-filler-2.wav',
+  '/assets/audio/rumik-filler-3.wav',
+  '/assets/audio/rumik-filler-4.wav',
+  '/assets/audio/rumik-filler-5.wav',
+  '/assets/audio/rumik-filler-6.wav',
+] as const;
 const STATIC_OPENING_ECHO_CALIBRATION_MS = 900;
 const STATIC_OPENING_BARGE_IN_SAMPLE_MS = 60;
 const STATIC_OPENING_BARGE_IN_REQUIRED_FRAMES = 2;
 const STATIC_OPENING_BARGE_IN_MIN_RMS = 0.04;
 const STATIC_OPENING_ECHO_DELTA_RMS = 0.022;
 const STATIC_OPENING_ECHO_MULTIPLIER = 2.4;
-
-const openingAudioCache: OpeningAudioCache = {
-  status: 'idle',
-  chunks: [],
-  promise: null,
-  error: '',
-  waiters: [],
-};
-
-const thinkingFillerAudioCaches: OpeningAudioCache[] = STABLE_THINKING_FILLERS.map(() => ({
-  status: 'idle',
-  chunks: [],
-  promise: null,
-  error: '',
-  waiters: [],
-}));
-
-function notifyOpeningAudioCacheWaiters() {
-  const waiters = openingAudioCache.waiters.splice(0);
-  waiters.forEach((resolve) => resolve());
-}
-
-function notifyAudioCacheWaiters(cache: OpeningAudioCache) {
-  const waiters = cache.waiters.splice(0);
-  waiters.forEach((resolve) => resolve());
-}
 
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -230,8 +212,29 @@ function getPcm16Rms(chunk: ArrayBuffer): number {
 }
 
 function logVoiceDebug(event: string, details?: Record<string, unknown>) {
-  void event;
-  void details;
+  const normalized = event.toLowerCase();
+  const isWebsocketLog =
+    normalized.includes('socket') ||
+    normalized.includes('websocket') ||
+    normalized.includes('ws:') ||
+    normalized.includes('realtime:data-channel');
+  if (isWebsocketLog) return;
+  if (typeof window === 'undefined') return;
+
+  const payload = JSON.stringify({
+    event: `voice-debug:${event}`.slice(0, 80),
+    details: details ?? {},
+  });
+  if (navigator.sendBeacon) {
+    const sent = navigator.sendBeacon('/api/voice/timing-log', new Blob([payload], { type: 'application/json' }));
+    if (sent) return;
+  }
+  void fetch('/api/voice/timing-log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload,
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function postVoiceTiming(input: {
@@ -420,264 +423,13 @@ async function readAgentResponseStream(
   return result;
 }
 
-function prefetchOpeningAudio(): Promise<void> {
-  if (typeof window === 'undefined') return Promise.resolve();
-  if (openingAudioCache.status === 'ready') return Promise.resolve();
-  if (openingAudioCache.promise) return openingAudioCache.promise;
-
-  openingAudioCache.status = 'loading';
-  openingAudioCache.chunks = [];
-  openingAudioCache.error = '';
-  notifyOpeningAudioCacheWaiters();
-
-  const startedAt = Date.now();
-  logVoiceDebug('rumik:opening-cache:request', { textChars: STABLE_DEFAULT_OPENING.length });
-
-  const cachePromise = fetch('/api/voice/rumik-session', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: STABLE_DEFAULT_OPENING }),
-  })
-    .then(async (response) => {
-      const data = (await response.json()) as Partial<RumikSessionData> & { error?: string };
-      if (!response.ok || !data.ws_url || !data.token) {
-        throw new Error(data?.error || 'Could not prepare opening audio');
-      }
-      const wsUrl = data.ws_url;
-      const token = data.token;
-
-      return new Promise<void>((resolve) => {
-        let settled = false;
-        let textPackets = 0;
-        let binaryPackets = 0;
-        let timeoutId: number | null = null;
-        let socket: WebSocket | null = null;
-        let lastProgressAt = startedAt;
-
-        const finish = (status: 'ready' | 'error', message = '') => {
-          if (settled) return;
-          settled = true;
-          if (timeoutId) window.clearTimeout(timeoutId);
-          if (status === 'error' && socket && socket.readyState < WebSocket.CLOSING) {
-            socket.close();
-          }
-          openingAudioCache.status = status;
-          openingAudioCache.error = message;
-          openingAudioCache.promise = null;
-          notifyOpeningAudioCacheWaiters();
-          logVoiceDebug(status === 'ready' ? 'rumik:opening-cache:ready' : 'rumik:opening-cache:error', {
-            chunks: openingAudioCache.chunks.length,
-            elapsedMs: Date.now() - startedAt,
-            ...(message ? { message } : {}),
-          });
-          resolve();
-        };
-
-        const refreshOpeningCacheTimeout = () => {
-          lastProgressAt = Date.now();
-          if (timeoutId) window.clearTimeout(timeoutId);
-          timeoutId = window.setTimeout(() => {
-            const now = Date.now();
-            logVoiceDebug('rumik:opening-cache:timeout', {
-              chunks: openingAudioCache.chunks.length,
-              textPackets,
-              binaryPackets,
-              elapsedMs: now - startedAt,
-              lastPacketAgeMs: now - lastProgressAt,
-            });
-            finish('error', 'Opening audio cache timed out waiting for more audio');
-          }, OPENING_AUDIO_CACHE_TIMEOUT_MS);
-        };
-
-        refreshOpeningCacheTimeout();
-        socket = new WebSocket(`${wsUrl}?token=${encodeURIComponent(token)}`);
-        socket.binaryType = 'arraybuffer';
-
-        socket.onopen = () => {
-          logVoiceDebug('rumik:opening-cache:socket-open');
-        };
-
-        socket.onmessage = (event) => {
-          if (settled) return;
-          if (typeof event.data === 'string') {
-            const message = JSON.parse(event.data) as { type?: string };
-            textPackets += 1;
-            refreshOpeningCacheTimeout();
-            logVoiceDebug('rumik:opening-cache:message:text', {
-              packet: textPackets,
-              ...message,
-            });
-            if (message.type === 'done') {
-              if (openingAudioCache.chunks.length > 0) {
-                socket?.close();
-                finish('ready');
-              } else {
-                finish('error', 'Opening audio cache produced no audio');
-              }
-            }
-            return;
-          }
-
-          const chunk = event.data as ArrayBuffer;
-          binaryPackets += 1;
-          refreshOpeningCacheTimeout();
-          openingAudioCache.chunks.push(chunk.slice(0));
-          notifyOpeningAudioCacheWaiters();
-          if (binaryPackets === 1) {
-            logVoiceDebug('rumik:opening-cache:first-binary', {
-              bytes: chunk.byteLength,
-              elapsedMs: Date.now() - startedAt,
-            });
-          }
-        };
-
-        socket.onerror = () => {
-          finish('error', 'Opening audio cache stream had an issue');
-        };
-
-        socket.onclose = () => {
-          if (!settled) {
-            finish('error', 'Opening audio cache closed before completion');
-          }
-        };
-      });
-    })
-    .catch((cacheError) => {
-      openingAudioCache.status = 'error';
-      openingAudioCache.promise = null;
-      openingAudioCache.error = cacheError instanceof Error ? cacheError.message : 'Opening audio cache failed';
-      notifyOpeningAudioCacheWaiters();
-      logVoiceDebug('rumik:opening-cache:error', {
-        message: openingAudioCache.error,
-        elapsedMs: Date.now() - startedAt,
-      });
-    });
-
-  openingAudioCache.promise = cachePromise;
-  return cachePromise;
-}
-
-function prefetchAudioCache(input: { cache: OpeningAudioCache; text: string; label: string }): Promise<void> {
-  if (typeof window === 'undefined') return Promise.resolve();
-  if (input.cache.status === 'ready') return Promise.resolve();
-  if (input.cache.promise) return input.cache.promise;
-
-  input.cache.status = 'loading';
-  input.cache.chunks = [];
-  input.cache.error = '';
-  notifyAudioCacheWaiters(input.cache);
-
-  const startedAt = Date.now();
-  logVoiceDebug(`rumik:${input.label}-cache:request`, { textChars: input.text.length });
-
-  const cachePromise = fetch('/api/voice/rumik-session', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: input.text }),
-  })
-    .then(async (response) => {
-      const data = (await response.json()) as Partial<RumikSessionData> & { error?: string };
-      if (!response.ok || !data.ws_url || !data.token) {
-        throw new Error(data?.error || `Could not prepare ${input.label} audio`);
-      }
-
-      return new Promise<void>((resolve) => {
-        let settled = false;
-        let timeoutId: number | null = null;
-        let socket: WebSocket | null = null;
-
-        const finish = (status: 'ready' | 'error', message = '') => {
-          if (settled) return;
-          settled = true;
-          if (timeoutId) window.clearTimeout(timeoutId);
-          if (status === 'error' && socket && socket.readyState < WebSocket.CLOSING) {
-            socket.close();
-          }
-          input.cache.status = status;
-          input.cache.error = message;
-          input.cache.promise = null;
-          notifyAudioCacheWaiters(input.cache);
-          logVoiceDebug(`rumik:${input.label}-cache:${status}`, {
-            chunks: input.cache.chunks.length,
-            elapsedMs: Date.now() - startedAt,
-            ...(message ? { message } : {}),
-          });
-          resolve();
-        };
-
-        const refreshTimeout = () => {
-          if (timeoutId) window.clearTimeout(timeoutId);
-          timeoutId = window.setTimeout(() => {
-            finish('error', `${input.label} audio cache timed out waiting for more audio`);
-          }, OPENING_AUDIO_CACHE_TIMEOUT_MS);
-        };
-
-        refreshTimeout();
-        socket = new WebSocket(
-          `${String(data.ws_url)}?token=${encodeURIComponent(String(data.token ?? ''))}`,
-        );
-        socket.binaryType = 'arraybuffer';
-
-        socket.onopen = () => {
-          logVoiceDebug(`rumik:${input.label}-cache:socket-open`);
-        };
-
-        socket.onmessage = (event) => {
-          if (settled) return;
-          refreshTimeout();
-          if (typeof event.data === 'string') {
-            const message = JSON.parse(event.data) as { type?: string };
-            if (message.type === 'done') {
-              if (input.cache.chunks.length > 0) {
-                socket?.close();
-                finish('ready');
-              } else {
-                finish('error', `${input.label} audio cache produced no audio`);
-              }
-            }
-            return;
-          }
-
-          input.cache.chunks.push((event.data as ArrayBuffer).slice(0));
-          notifyAudioCacheWaiters(input.cache);
-        };
-
-        socket.onerror = () => {
-          finish('error', `${input.label} audio cache stream had an issue`);
-        };
-
-        socket.onclose = () => {
-          if (!settled) finish('error', `${input.label} audio cache closed before completion`);
-        };
-      });
-    })
-    .catch((cacheError) => {
-      input.cache.status = 'error';
-      input.cache.promise = null;
-      input.cache.error = cacheError instanceof Error ? cacheError.message : `${input.label} audio cache failed`;
-      notifyAudioCacheWaiters(input.cache);
-      logVoiceDebug(`rumik:${input.label}-cache:error`, {
-        message: input.cache.error,
-        elapsedMs: Date.now() - startedAt,
-      });
-    });
-
-  input.cache.promise = cachePromise;
-  return cachePromise;
-}
-
-function prefetchThinkingFillerAudio(): Promise<void> {
-  return STABLE_THINKING_FILLERS.reduce(
-    (chain, text, index) =>
-      chain.then(() =>
-        prefetchAudioCache({
-          cache: thinkingFillerAudioCaches[index],
-          text,
-          label: 'thinking-filler',
-        }),
-      ),
-    Promise.resolve(),
-  );
+function prefetchStaticThinkingFillerAudio() {
+  if (typeof Audio === 'undefined') return;
+  STATIC_RUMIK_FILLER_SRCS.forEach((src) => {
+    const audio = new Audio(src);
+    audio.preload = 'auto';
+    audio.load();
+  });
 }
 
 function shouldPauseMicrophoneRecorder(input: { muted: boolean; callState: CallState }): boolean {
@@ -757,6 +509,7 @@ export function AgentCallClient() {
   const rumikReadyRef = useRef<Promise<WebSocket> | null>(null);
   const rumikDoneRef = useRef<(() => void) | null>(null);
   const pendingRumikRequestsRef = useRef(0);
+  const pendingRumikRequestQueueRef = useRef<PendingRumikTtsRequest[]>([]);
   const pendingRumikSourcesRef = useRef(0);
   const rumikStreamDoneRef = useRef(false);
   const rumikToneRef = useRef<RumikTone>('neutral');
@@ -786,6 +539,7 @@ export function AgentCallClient() {
   const micPacketCountRef = useRef(0);
   const rumikTextPacketCountRef = useRef(0);
   const rumikBinaryPacketCountRef = useRef(0);
+  const rumikTtsRequestIdRef = useRef(0);
   const transcriptionAttemptRef = useRef(0);
   const rumikLeadingSilenceRef = useRef({ trimming: true, dropped: 0 });
   const latestMicRmsRef = useRef(0);
@@ -848,8 +602,7 @@ export function AgentCallClient() {
   }, [callState]);
 
   useEffect(() => {
-    void prefetchOpeningAudio();
-    void prefetchThinkingFillerAudio();
+    prefetchStaticThinkingFillerAudio();
   }, []);
 
   useEffect(() => {
@@ -1028,6 +781,13 @@ export function AgentCallClient() {
     }
   }, []);
 
+  const clearPendingRumikTtsRequest = useCallback((request: PendingRumikTtsRequest) => {
+    if (request.timer !== null) {
+      window.clearTimeout(request.timer);
+      request.timer = null;
+    }
+  }, []);
+
   const stopRumikAudio = useCallback(() => {
     logVoiceDebug('rumik:playback:stop', { activeSources: sourcesRef.current.length });
     rumikPlaybackIdRef.current += 1;
@@ -1042,6 +802,8 @@ export function AgentCallClient() {
       staticOpeningBargeInTimerRef.current = null;
     }
     rumikSpeakingRef.current = false;
+    pendingRumikRequestQueueRef.current.forEach(clearPendingRumikTtsRequest);
+    pendingRumikRequestQueueRef.current = [];
     pendingRumikRequestsRef.current = 0;
     pendingRumikSourcesRef.current = 0;
     rumikStreamDoneRef.current = true;
@@ -1057,7 +819,7 @@ export function AgentCallClient() {
     });
     sourcesRef.current = [];
     scheduledAtRef.current = audioContextRef.current?.currentTime ?? 0;
-  }, []);
+  }, [clearPendingRumikTtsRequest]);
 
   const closeRumikSocket = useCallback(() => {
     stopRumikAudio();
@@ -1151,6 +913,8 @@ export function AgentCallClient() {
                   ...message,
                 });
                 if (message.type === 'done') {
+                  const completedRequest = pendingRumikRequestQueueRef.current.shift();
+                  if (completedRequest) clearPendingRumikTtsRequest(completedRequest);
                   pendingRumikRequestsRef.current = Math.max(0, pendingRumikRequestsRef.current - 1);
                   rumikStreamDoneRef.current = pendingRumikRequestsRef.current === 0;
                   logVoiceDebug('rumik:message:text:done-waiting-playback', {
@@ -1169,6 +933,10 @@ export function AgentCallClient() {
               }
               const chunk = event.data as ArrayBuffer;
               rumikBinaryPacketCountRef.current += 1;
+              pendingRumikRequestQueueRef.current.forEach((request) => {
+                request.receivedAudio = true;
+                clearPendingRumikTtsRequest(request);
+              });
               const rms = getPcm16Rms(chunk);
               const activeTimingTurn = activeVoiceTimingTurnRef.current;
               if (activeTimingTurn?.firstAnswerTextSentLogged && !activeTimingTurn.firstAnswerAudioLogged) {
@@ -1261,6 +1029,8 @@ export function AgentCallClient() {
               if (rumikRef.current === socket) rumikRef.current = null;
               rumikReadyRef.current = null;
               rumikSpeakingRef.current = false;
+              pendingRumikRequestQueueRef.current.forEach(clearPendingRumikTtsRequest);
+              pendingRumikRequestQueueRef.current = [];
               pendingRumikRequestsRef.current = 0;
               pendingRumikSourcesRef.current = 0;
               rumikStreamDoneRef.current = true;
@@ -1277,7 +1047,7 @@ export function AgentCallClient() {
       rumikReadyRef.current = readyPromise;
       return readyPromise;
     },
-    [appendTranscript, finishRumikPlaybackTurn],
+    [appendTranscript, clearPendingRumikTtsRequest, finishRumikPlaybackTurn],
   );
 
   const warmRumikSocket = useCallback((seedText = '[neutral] Ji, main details check kar rahi hoon.') => {
@@ -1299,207 +1069,6 @@ export function AgentCallClient() {
       rumikDoneRef.current = resolve;
     });
   }, []);
-
-  const playCachedOpeningAudio = useCallback(async (): Promise<boolean> => {
-    if (openingAudioCache.chunks.length < 1) return false;
-
-    stopRumikAudio();
-    const playbackId = rumikPlaybackIdRef.current;
-
-    if (!audioContextRef.current) audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-    await audioContextRef.current.resume();
-    if (playbackId !== rumikPlaybackIdRef.current) return true;
-
-    const context = audioContextRef.current;
-    scheduledAtRef.current = Math.max(scheduledAtRef.current, context.currentTime + 0.02);
-    setIsListening(false);
-    callStateRef.current = 'speaking';
-    setCallState('speaking');
-    rumikSpeakingRef.current = true;
-
-    logVoiceDebug('rumik:opening-cache:play', {
-      chunks: openingAudioCache.chunks.length,
-      status: openingAudioCache.status,
-    });
-
-    await new Promise<void>((resolve) => {
-      let pendingSources = 0;
-      let resolved = false;
-      let nextChunkIndex = 0;
-      let allChunksScheduled = false;
-
-      const finish = () => {
-        if (resolved) return;
-        resolved = true;
-        rumikSpeakingRef.current = false;
-        rumikDoneRef.current = null;
-        if (callStateRef.current !== 'idle' && callStateRef.current !== 'error') {
-          callStateRef.current = 'connected';
-          setCallState('connected');
-        }
-        resolve();
-      };
-
-      const maybeFinish = () => {
-        if (allChunksScheduled && pendingSources === 0) finish();
-      };
-
-      const waitForOpeningCacheChange = () =>
-        new Promise<void>((cacheResolve) => {
-          openingAudioCache.waiters.push(cacheResolve);
-        });
-
-      const pumpChunks = async () => {
-        while (!resolved && playbackId === rumikPlaybackIdRef.current) {
-          if (nextChunkIndex >= openingAudioCache.chunks.length) {
-            if (openingAudioCache.status === 'loading') {
-              await waitForOpeningCacheChange();
-              continue;
-            }
-            allChunksScheduled = true;
-            maybeFinish();
-            return;
-          }
-
-          const index = nextChunkIndex;
-          const chunk = openingAudioCache.chunks[index];
-          nextChunkIndex += 1;
-
-          const buffer = pcm16ToAudioBuffer(context, chunk);
-          const source = context.createBufferSource();
-          source.buffer = buffer;
-          source.connect(context.destination);
-          const startAt = Math.max(scheduledAtRef.current, context.currentTime + 0.02);
-          source.start(startAt);
-          scheduledAtRef.current = startAt + buffer.duration;
-          pendingSources += 1;
-          sourcesRef.current.push(source);
-          logVoiceDebug('rumik:opening-cache:scheduled', {
-            packet: index + 1,
-            durationMs: Math.round(buffer.duration * 1000),
-            delayMs: Math.round((startAt - context.currentTime) * 1000),
-            queueMs: Math.round(Math.max(0, scheduledAtRef.current - context.currentTime) * 1000),
-          });
-          source.onended = () => {
-            sourcesRef.current = sourcesRef.current.filter((item) => item !== source);
-            pendingSources -= 1;
-            maybeFinish();
-          };
-        }
-
-        allChunksScheduled = true;
-        maybeFinish();
-      };
-
-      rumikDoneRef.current = finish;
-
-      void pumpChunks();
-    });
-
-    return true;
-  }, [stopRumikAudio]);
-
-  const playCachedAudioChunks = useCallback(
-    async (cache: OpeningAudioCache, label: string): Promise<boolean> => {
-      if (cache.chunks.length < 1) return false;
-
-      stopRumikAudio();
-      const playbackId = rumikPlaybackIdRef.current;
-
-      if (!audioContextRef.current) audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      await audioContextRef.current.resume();
-      if (playbackId !== rumikPlaybackIdRef.current) return true;
-
-      const context = audioContextRef.current;
-      scheduledAtRef.current = Math.max(scheduledAtRef.current, context.currentTime + 0.02);
-      setIsListening(false);
-      callStateRef.current = 'speaking';
-      setCallState('speaking');
-      rumikSpeakingRef.current = true;
-
-      logVoiceDebug(`rumik:${label}-cache:play`, {
-        chunks: cache.chunks.length,
-        status: cache.status,
-      });
-
-      await new Promise<void>((resolve) => {
-        let pendingSources = 0;
-        let resolved = false;
-        let nextChunkIndex = 0;
-        let allChunksScheduled = false;
-
-        const finish = () => {
-          if (resolved) return;
-          resolved = true;
-          rumikSpeakingRef.current = false;
-          rumikDoneRef.current = null;
-          if (callStateRef.current !== 'idle' && callStateRef.current !== 'error') {
-            callStateRef.current = 'connected';
-            setCallState('connected');
-          }
-          resolve();
-        };
-
-        const maybeFinish = () => {
-          if (allChunksScheduled && pendingSources === 0) finish();
-        };
-
-        const waitForCacheChange = () =>
-          new Promise<void>((cacheResolve) => {
-            cache.waiters.push(cacheResolve);
-          });
-
-        const pumpChunks = async () => {
-          while (!resolved && playbackId === rumikPlaybackIdRef.current) {
-            if (nextChunkIndex >= cache.chunks.length) {
-              if (cache.status === 'loading') {
-                await waitForCacheChange();
-                continue;
-              }
-              allChunksScheduled = true;
-              maybeFinish();
-              return;
-            }
-
-            const index = nextChunkIndex;
-            const chunk = cache.chunks[index];
-            nextChunkIndex += 1;
-
-            const buffer = pcm16ToAudioBuffer(context, chunk);
-            const source = context.createBufferSource();
-            source.buffer = buffer;
-            source.connect(context.destination);
-            const startAt = Math.max(scheduledAtRef.current, context.currentTime + 0.02);
-            source.start(startAt);
-            scheduledAtRef.current = startAt + buffer.duration;
-            pendingSources += 1;
-            sourcesRef.current.push(source);
-            logVoiceDebug(`rumik:${label}-cache:scheduled`, {
-              packet: index + 1,
-              durationMs: Math.round(buffer.duration * 1000),
-              delayMs: Math.round((startAt - context.currentTime) * 1000),
-              queueMs: Math.round(Math.max(0, scheduledAtRef.current - context.currentTime) * 1000),
-            });
-            source.onended = () => {
-              sourcesRef.current = sourcesRef.current.filter((item) => item !== source);
-              pendingSources -= 1;
-              maybeFinish();
-            };
-          }
-
-          allChunksScheduled = true;
-          maybeFinish();
-        };
-
-        rumikDoneRef.current = finish;
-
-        void pumpChunks();
-      });
-
-      return true;
-    },
-    [stopRumikAudio],
-  );
 
   const playRumikText = useCallback(
     async (
@@ -1534,7 +1103,63 @@ export function AgentCallClient() {
       const normalizedText = normalizeRumikText(text, resetPlayback ? 'neutral' : rumikToneRef.current);
       rumikToneRef.current = extractRumikStartingTone(normalizedText) ?? rumikToneRef.current;
       const packet = { text: normalizedText.slice(0, 2000), speaker_id: 0 };
+      const request: PendingRumikTtsRequest = {
+        id: rumikTtsRequestIdRef.current + 1,
+        packet,
+        playbackId,
+        retryCount: 0,
+        receivedAudio: false,
+        timer: null,
+      };
+      rumikTtsRequestIdRef.current = request.id;
+      const scheduleFirstAudioWatchdog = () => {
+        clearPendingRumikTtsRequest(request);
+        request.timer = window.setTimeout(() => {
+          const stillPending = pendingRumikRequestQueueRef.current.includes(request);
+          if (!stillPending || request.receivedAudio || playbackId !== rumikPlaybackIdRef.current) return;
+
+          if (request.retryCount < RUMIK_TTS_MAX_SEND_RETRIES) {
+            request.retryCount += 1;
+            logVoiceDebug('rumik:send:first-audio-timeout:retry', {
+              requestId: request.id,
+              retryCount: request.retryCount,
+              pendingRequests: pendingRumikRequestsRef.current,
+              textChars: request.packet.text.length,
+            });
+            const activeSocket = rumikRef.current;
+            if (activeSocket?.readyState === WebSocket.OPEN) {
+              try {
+                activeSocket.send(JSON.stringify(request.packet));
+                scheduleFirstAudioWatchdog();
+                return;
+              } catch (retryError) {
+                logVoiceDebug('rumik:send:first-audio-timeout:retry-error', {
+                  requestId: request.id,
+                  message: retryError instanceof Error ? retryError.message : String(retryError),
+                });
+              }
+            } else {
+              logVoiceDebug('rumik:send:first-audio-timeout:retry-skipped', {
+                requestId: request.id,
+                readyState: activeSocket?.readyState ?? null,
+              });
+            }
+          }
+
+          pendingRumikRequestQueueRef.current = pendingRumikRequestQueueRef.current.filter((item) => item !== request);
+          pendingRumikRequestsRef.current = Math.max(0, pendingRumikRequestsRef.current - 1);
+          rumikStreamDoneRef.current = pendingRumikRequestsRef.current === 0;
+          logVoiceDebug('rumik:send:first-audio-timeout:give-up', {
+            requestId: request.id,
+            pendingRequests: pendingRumikRequestsRef.current,
+            pendingSources: pendingRumikSourcesRef.current,
+            textChars: request.packet.text.length,
+          });
+          finishRumikPlaybackTurn();
+        }, RUMIK_TTS_FIRST_AUDIO_TIMEOUT_MS);
+      };
       pendingRumikRequestsRef.current += 1;
+      pendingRumikRequestQueueRef.current.push(request);
       rumikStreamDoneRef.current = false;
       if (options.timingLabel === 'answer') {
         const activeTimingTurn = activeVoiceTimingTurnRef.current;
@@ -1557,7 +1182,10 @@ export function AgentCallClient() {
 
       try {
         socket.send(JSON.stringify(packet));
+        scheduleFirstAudioWatchdog();
       } catch (sendError) {
+        clearPendingRumikTtsRequest(request);
+        pendingRumikRequestQueueRef.current = pendingRumikRequestQueueRef.current.filter((item) => item !== request);
         pendingRumikRequestsRef.current = Math.max(0, pendingRumikRequestsRef.current - 1);
         rumikStreamDoneRef.current = pendingRumikRequestsRef.current === 0;
         logVoiceDebug('rumik:send:error', {
@@ -1569,7 +1197,55 @@ export function AgentCallClient() {
 
       if (waitForCompletion) await waitForRumikPlaybackTurn();
     },
-    [ensureRumikSocket, stopRumikAudio, waitForRumikPlaybackTurn],
+    [clearPendingRumikTtsRequest, ensureRumikSocket, finishRumikPlaybackTurn, stopRumikAudio, waitForRumikPlaybackTurn],
+  );
+
+  const playStaticThinkingFillerAudio = useCallback(
+    async (index: number): Promise<boolean> => {
+      if (typeof Audio === 'undefined' || isInactiveCallState(callStateRef.current)) return false;
+
+      const src = STATIC_RUMIK_FILLER_SRCS[index];
+      if (!src) return false;
+
+      stopRumikAudio();
+      const playbackId = rumikPlaybackIdRef.current;
+      const audio = new Audio(src);
+      audio.preload = 'auto';
+      audio.setAttribute('playsInline', '');
+
+      setIsListening(false);
+      callStateRef.current = 'speaking';
+      setCallState('speaking');
+      rumikSpeakingRef.current = true;
+
+      logVoiceDebug('rumik:thinking-filler-static:play', { src, index });
+
+      const played = await new Promise<boolean>((resolve) => {
+        const cleanup = (ok: boolean) => {
+          rumikSpeakingRef.current = false;
+          if (playbackId === rumikPlaybackIdRef.current && !isInactiveCallState(callStateRef.current)) {
+            callStateRef.current = 'connected';
+            setCallState('connected');
+          }
+          resolve(ok);
+        };
+
+        audio.onended = () => cleanup(true);
+        audio.onerror = () => cleanup(false);
+        audio.play().catch((playError) => {
+          logVoiceDebug('rumik:thinking-filler-static:play-failed', {
+            src,
+            index,
+            message: playError instanceof Error ? playError.message : 'unknown',
+          });
+          cleanup(false);
+        });
+      });
+
+      if (!played) logVoiceDebug('rumik:thinking-filler-static:error', { src, index });
+      return played;
+    },
+    [stopRumikAudio],
   );
 
   const playThinkingFillerAudio = useCallback(async () => {
@@ -1581,25 +1257,14 @@ export function AgentCallClient() {
         event: 'filler_playback_start',
       });
     }
-    const readyIndexes = thinkingFillerAudioCaches
-      .map((cache, index) => ({ cache, index }))
-      .filter(({ cache }) => cache.chunks.length > 0);
-    const selectedIndex =
-      readyIndexes.length > 0
-        ? readyIndexes[Math.floor(Math.random() * readyIndexes.length)].index
-        : Math.floor(Math.random() * STABLE_THINKING_FILLERS.length);
-    const cache = thinkingFillerAudioCaches[selectedIndex];
+    const selectedIndex = Math.floor(Math.random() * STABLE_THINKING_FILLERS.length);
     const text = STABLE_THINKING_FILLERS[selectedIndex];
     const transcriptText = stripTranscriptToneTag(text);
 
     appendTranscript('agent', transcriptText);
 
-    if (cache.status === 'idle' || cache.status === 'error') {
-      void prefetchAudioCache({ cache, text, label: 'thinking-filler' });
-    }
-
     try {
-      if (await playCachedAudioChunks(cache, 'thinking-filler')) return;
+      if (await playStaticThinkingFillerAudio(selectedIndex)) return;
       await playRumikText(text, { trimLeadingSilence: false });
     } finally {
       if (timingTurn) {
@@ -1610,7 +1275,7 @@ export function AgentCallClient() {
         });
       }
     }
-  }, [appendTranscript, playCachedAudioChunks, playRumikText]);
+  }, [appendTranscript, playRumikText, playStaticThinkingFillerAudio]);
 
   const playStaticOpeningAudio = useCallback(async (): Promise<boolean> => {
     if (typeof Audio === 'undefined' || isInactiveCallState(callStateRef.current)) return false;
@@ -1728,13 +1393,8 @@ export function AgentCallClient() {
     if (isInactiveCallState(callStateRef.current)) return;
     if (await playStaticOpeningAudio()) return;
     if (isInactiveCallState(callStateRef.current)) return;
-    if (await playCachedOpeningAudio()) return;
-    if (isInactiveCallState(callStateRef.current)) return;
-    if (openingAudioCache.status === 'idle' || openingAudioCache.status === 'error') {
-      void prefetchOpeningAudio();
-    }
     await playRumikText(STABLE_DEFAULT_OPENING, { trimLeadingSilence: false });
-  }, [playCachedOpeningAudio, playRumikText, playStaticOpeningAudio]);
+  }, [playRumikText, playStaticOpeningAudio]);
 
   const endCall = useCallback(() => {
     logVoiceDebug('call:end');

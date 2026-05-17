@@ -38,7 +38,7 @@ test('diagnostic log filter drops routine voice and agent events', () => {
 
 test('diagnostic log filter keeps failures and missing configuration', () => {
   assert.equal(shouldLogDiagnosticEvent({ event: 'rumik:socket:error' }), true);
-  assert.equal(shouldLogDiagnosticEvent({ event: 'rumik:opening-cache:timeout' }), true);
+  assert.equal(shouldLogDiagnosticEvent({ event: 'rumik:send:first-audio-timeout:give-up' }), true);
   assert.equal(shouldLogDiagnosticEvent({ event: 'realtime:sdp:error' }), true);
   assert.equal(shouldLogDiagnosticEvent({ event: 'config:missing-api-key' }), true);
 });

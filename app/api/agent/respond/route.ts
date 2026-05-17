@@ -46,6 +46,11 @@ function routeLogPayload(route: StableIntentRoute | null | undefined): Record<st
   };
 }
 
+function answerPreview(text: string): string {
+  const trimmed = text.trim().replace(/\s+/g, ' ');
+  return trimmed.length > 200 ? `${trimmed.slice(0, 200)}...` : trimmed;
+}
+
 export async function POST(request: Request) {
   let body: unknown;
   try {
@@ -119,6 +124,14 @@ export async function POST(request: Request) {
           return markDemoCallVerifiedMobileLastFourInStore(pool, sessionId, callId, lastFour, route);
         },
       },
+    });
+    console.log('[stable-agent-api:response]', {
+      session_id: sessionId,
+      call_id: String(callId ?? 'default'),
+      verified: answer.verified === true,
+      tool_calls: answer.toolCalls ?? [],
+      response_preview: answerPreview(answer.text || ''),
+      response_chars: (answer.text || '').length,
     });
     if (answer.verified) await markDemoCallVerifiedInStore(pool, sessionId, callId);
 

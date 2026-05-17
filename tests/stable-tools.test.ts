@@ -246,7 +246,7 @@ test('executeStableToolWithContext awaits async mobile-step persistence before r
 });
 
 
-test('executeStableTool reads payment reconciliation status with Project.md safe phrasing', () => {
+test('executeStableTool keeps payment reconciliation summaries neutral unless the agent chooses reassurance', () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -254,11 +254,13 @@ test('executeStableTool reads payment reconciliation status with Project.md safe
 
   assert.equal(result.ok, true);
   assert.match(result.summary, /pending reconciliation/i);
-  assert.match(result.summary, /aapka paisa safe hai/i);
-  assert.match(result.summary, /worst case mein refund mil jayega, koi loss nahi hoga/i);
+  assert.doesNotMatch(result.summary, /aapka paisa safe hai/i);
+  assert.doesNotMatch(result.summary, /worst case mein refund mil jayega, koi loss nahi hoga/i);
+  assert.doesNotMatch(result.summary, /refund/i);
   assert.match(result.summary, /PAY-8831/);
   assert.equal(result.data?.payment_reference, 'PAY-8831');
   assert.equal(result.data?.intent_id, 'payment.failed');
+  assert.deepEqual(result.data?.safe_phrases, ['aapka paisa safe hai', 'worst case mein refund mil jayega, koi loss nahi hoga']);
 });
 
 test('executeStableTool asks which payment when a customer has multiple payments and no reference', () => {
@@ -269,8 +271,8 @@ test('executeStableTool asks which payment when a customer has multiple payments
 
   assert.equal(result.ok, false);
   assert.match(result.summary, /Kaunsa payment/i);
-  assert.match(result.summary, /PAY-4412/);
-  assert.match(result.summary, /PAY-5148/);
+  assert.doesNotMatch(result.summary, /PAY-4412|PAY-5148/);
+  assert.match(result.summary, /amount ya bank/i);
   assert.equal(result.data?.match_count, 2);
 });
 
@@ -367,8 +369,8 @@ test('executeStableTool asks which fixed deposit when a customer has multiple FD
 
   assert.equal(result.ok, false);
   assert.match(result.summary, /Kaunsi FD/i);
-  assert.match(result.summary, /FD-4412/);
-  assert.match(result.summary, /FD-5148/);
+  assert.doesNotMatch(result.summary, /FD-4412|FD-5148/);
+  assert.match(result.summary, /FD code, bank, ya amount/i);
   assert.equal(result.data?.match_count, 2);
 });
 
@@ -409,7 +411,49 @@ test('executeStableTool quotes premature withdrawal and refuses irreversible exe
 
   assert.equal(result.ok, true);
   assert.match(result.summary, /secure link/i);
-  assert.match(result.summary, /execute nahi hota/i);
+  assert.doesNotMatch(result.summary, /execute nahi hota|sirf link prepare/i);
+});
+
+test('executeStableTool keeps summary and rates source notes compact', () => {
+  const persona = getPersonaById('cust_demo_004');
+  assert.ok(persona);
+
+  const paymentSummary = executeStableTool(persona, 'get_payment_summary');
+  assert.equal(paymentSummary.ok, true);
+  assert.match(paymentSummary.summary, /Payment records available hain/i);
+  assert.doesNotMatch(paymentSummary.summary, /account mein|\d|payment records dikh/i);
+  assert.doesNotMatch(paymentSummary.summary, /PAY-4412|PAY-5148|HDFC|Kotak/);
+  assert.equal((paymentSummary.data?.payments as unknown[])?.length, 2);
+
+  const fdSummary = executeStableTool(persona, 'get_fd_summary');
+  assert.equal(fdSummary.ok, true);
+  assert.match(fdSummary.summary, /FD records available hain/i);
+  assert.doesNotMatch(fdSummary.summary, /account mein|\d|FDs dikh/i);
+  assert.doesNotMatch(fdSummary.summary, /FD-4412|FD-5148|Shriram Finance|Mahindra Finance/);
+  assert.equal((fdSummary.data?.fixed_deposits as unknown[])?.length, 2);
+
+  const rates = executeStableTool(persona, 'get_fd_rates', { tenure: '12 months' });
+  assert.equal(rates.ok, true);
+  assert.doesNotMatch(rates.summary, /senior citizen/i);
+  assert.match(rates.summary, /rates available/i);
+});
+
+test('executeStableTool keeps ticket and secure-action summaries concise', () => {
+  const persona = getPersonaById('cust_demo_004');
+  assert.ok(persona);
+
+  const ticket = executeStableTool(persona, 'create_support_ticket', { issue: 'Payment delay', priority: 'high' });
+  assert.equal(ticket.ok, true);
+  assert.match(ticket.summary, /Support ticket/);
+  assert.doesNotMatch(ticket.summary, /Issue hai|Priority|Human support/i);
+
+  const missingSecureLink = executeStableTool(persona, 'send_secure_link', { action: 'bank_change' });
+  assert.equal(missingSecureLink.ok, false);
+  assert.doesNotMatch(missingSecureLink.summary, /support ticket create/i);
+
+  const quoteClarification = executeStableTool(persona, 'get_premature_withdrawal_quote');
+  assert.equal(quoteClarification.ok, false);
+  assert.doesNotMatch(quoteClarification.summary, /FD-4412|FD-5148|Shriram Finance|Mahindra Finance/);
 });
 
 test('executeStableTool reads support ticket status for a verified caller', () => {
