@@ -231,6 +231,72 @@ test('agent call client consumes timing and stream SSE events from respond-strea
   assert.match(clientSource, /agent:stream:event/);
 });
 
+test('agent call client preserves stream error status for rate-limit recovery', () => {
+  assert.match(clientSource, /class AgentResponseError extends Error/);
+  assert.match(clientSource, /status\?: number/);
+  const errorEventIndex = clientSource.indexOf("if (message.event === 'error')");
+  const statusIndex = clientSource.indexOf("typeof message.data.status === 'number'", errorEventIndex);
+  const throwIndex = clientSource.indexOf('throw new AgentResponseError', statusIndex);
+
+  assert.notEqual(errorEventIndex, -1);
+  assert.notEqual(statusIndex, -1);
+  assert.notEqual(throwIndex, -1);
+  assert.ok(errorEventIndex < statusIndex);
+  assert.ok(statusIndex < throwIndex);
+});
+
+test('agent call client plays the 429 static fallback before retrying non-stream response', () => {
+  const srcIndex = clientSource.indexOf("const STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC = '/assets/audio/rumik-429.wav';");
+  const playHelperIndex = clientSource.indexOf('const playRateLimitFallbackAudio = useCallback');
+  const catchIndex = clientSource.indexOf('} catch (agentError) {');
+  const rateLimitGateIndex = clientSource.indexOf('agentError instanceof AgentResponseError && agentError.status === 429', catchIndex);
+  const playbackIndex = clientSource.indexOf('await playRateLimitFallbackAudio();', rateLimitGateIndex);
+  const fallbackRequestIndex = clientSource.indexOf("fetch('/api/agent/respond'", playbackIndex);
+  const assetPath = path.join(process.cwd(), 'public', 'assets', 'audio', 'rumik-429.wav');
+
+  assert.notEqual(srcIndex, -1);
+  assert.notEqual(playHelperIndex, -1);
+  assert.notEqual(catchIndex, -1);
+  assert.notEqual(rateLimitGateIndex, -1);
+  assert.notEqual(playbackIndex, -1);
+  assert.notEqual(fallbackRequestIndex, -1);
+  assert.ok(fs.existsSync(assetPath));
+  assert.ok(rateLimitGateIndex < playbackIndex);
+  assert.ok(playbackIndex < fallbackRequestIndex);
+});
+
+test('agent call client keeps the call connected after rate-limit fallback audio exhausts retries', () => {
+  const catchIndex = clientSource.indexOf('} catch (agentError) {');
+  const rateLimitPlayedIndex = clientSource.indexOf('let rateLimitFallbackPlayed = false;', catchIndex);
+  const streamRateLimitIndex = clientSource.indexOf('rateLimitFallbackPlayed = await playRateLimitFallbackAudio();', rateLimitPlayedIndex);
+  const fallbackCatchIndex = clientSource.indexOf('} catch (fallbackError) {', streamRateLimitIndex);
+  const fallbackRateLimitIndex = clientSource.indexOf('rateLimitFallbackPlayed = await playRateLimitFallbackAudio();', fallbackCatchIndex);
+  const recoverIndex = clientSource.indexOf('if (rateLimitFallbackPlayed) {', fallbackRateLimitIndex);
+  const connectedRefIndex = clientSource.indexOf("callStateRef.current = 'connected';", recoverIndex);
+  const connectedStateIndex = clientSource.indexOf("setCallState('connected');", connectedRefIndex);
+  const returnIndex = clientSource.indexOf('return;', connectedStateIndex);
+  const errorIndex = clientSource.indexOf("setCallState('error');", catchIndex);
+
+  assert.notEqual(catchIndex, -1);
+  assert.notEqual(rateLimitPlayedIndex, -1);
+  assert.notEqual(streamRateLimitIndex, -1);
+  assert.notEqual(fallbackCatchIndex, -1);
+  assert.notEqual(fallbackRateLimitIndex, -1);
+  assert.notEqual(recoverIndex, -1);
+  assert.notEqual(connectedRefIndex, -1);
+  assert.notEqual(connectedStateIndex, -1);
+  assert.notEqual(returnIndex, -1);
+  assert.notEqual(errorIndex, -1);
+  assert.ok(catchIndex < rateLimitPlayedIndex);
+  assert.ok(rateLimitPlayedIndex < streamRateLimitIndex);
+  assert.ok(streamRateLimitIndex < fallbackCatchIndex);
+  assert.ok(fallbackCatchIndex < fallbackRateLimitIndex);
+  assert.ok(fallbackRateLimitIndex < recoverIndex);
+  assert.ok(recoverIndex < connectedRefIndex);
+  assert.ok(connectedStateIndex < returnIndex);
+  assert.ok(returnIndex < errorIndex);
+});
+
 test('agent call client can start verification filler immediately before server policy arrives', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
   const fetchIndex = clientSource.indexOf("fetch('/api/agent/respond-stream'", askAgentIndex);
@@ -352,6 +418,27 @@ test('agent call client queues answer audio without cutting the thinking filler 
   assert.ok(queueAfterFillerIndex < waitForBothIndex);
   assert.doesNotMatch(firstChunkSource, /cutActiveThinkingFiller/);
   assert.doesNotMatch(firstChunkSource, /resetPlayback: true/);
+});
+
+test('agent call client restores thinking state after static filler while agent response is pending', () => {
+  const staticFillerIndex = clientSource.indexOf('const playStaticThinkingFillerAudio = useCallback');
+  const cleanupIndex = clientSource.indexOf('const cleanup = (ok: boolean) => {', staticFillerIndex);
+  const restoreThinkingIndex = clientSource.indexOf("const nextState = respondingRef.current ? 'thinking' : 'connected';", cleanupIndex);
+  const setRefIndex = clientSource.indexOf('callStateRef.current = nextState;', restoreThinkingIndex);
+  const setStateIndex = clientSource.indexOf('setCallState(nextState);', setRefIndex);
+  const openingIndex = clientSource.indexOf('const playStaticOpeningAudio = useCallback');
+
+  assert.notEqual(staticFillerIndex, -1);
+  assert.notEqual(cleanupIndex, -1);
+  assert.notEqual(restoreThinkingIndex, -1);
+  assert.notEqual(setRefIndex, -1);
+  assert.notEqual(setStateIndex, -1);
+  assert.notEqual(openingIndex, -1);
+  assert.ok(staticFillerIndex < cleanupIndex);
+  assert.ok(cleanupIndex < restoreThinkingIndex);
+  assert.ok(restoreThinkingIndex < setRefIndex);
+  assert.ok(setRefIndex < setStateIndex);
+  assert.ok(setStateIndex < openingIndex);
 });
 
 test('agent call client queues fallback answers before waiting for the thinking filler to finish', () => {

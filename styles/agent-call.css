@@ -174,6 +174,7 @@
   border-radius: 50%;
   background: var(--bg-dark);
   position: relative;
+  overflow: visible;
   transition: filter 0.35s ease;
 }
 
@@ -223,22 +224,23 @@
 .voice-orb--thinking::after {
   content: '';
   position: absolute;
-  inset: -7px;
+  inset: -13px;
   padding: 2px;
   border-radius: 50%;
   background: conic-gradient(
     from 0deg,
     transparent 0deg,
-    transparent 255deg,
-    rgba(147, 197, 253, 0.75) 285deg,
-    rgba(59, 130, 246, 0.55) 305deg,
-    rgba(125, 211, 252, 0.45) 322deg,
+    transparent 246deg,
+    rgba(147, 197, 253, 0.4) 268deg,
+    rgba(59, 130, 246, 0.95) 290deg,
+    rgba(14, 165, 233, 0.9) 306deg,
+    rgba(125, 211, 252, 0.28) 328deg,
     transparent 360deg
   );
-  animation: rotateBorder 9s linear infinite;
+  animation: rotateBorder 1.8s linear infinite;
   z-index: 0;
-  mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 100%);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 100%);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 100%);
 }
 
 @keyframes rotateBorder {
@@ -759,7 +761,10 @@
   overscroll-behavior: contain;
   padding: 14px 18px 32px;
   background: var(--surface-raised);
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-top: 2px solid #000;
+  border-right: 0;
+  border-bottom: 0;
 }
 
 .transcript-line {
@@ -778,7 +783,10 @@
 }
 
 .verification-badge {
-  display: inline-block;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: table;
   padding: 4px 12px;
   margin-bottom: 10px;
   border-radius: 999px;

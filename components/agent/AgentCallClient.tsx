@@ -63,6 +63,16 @@ interface AgentStreamMessage {
   data: Record<string, unknown>;
 }
 
+class AgentResponseError extends Error {
+  status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'AgentResponseError';
+    this.status = status;
+  }
+}
+
 interface VoiceTimingTurn {
   id: string;
   startedAt: number;
@@ -118,6 +128,7 @@ const AGENT_CLIENT_HISTORY_LIMIT = 16;
 const INCOMING_RINGTONE_SRC = '/assets/ringtone.mp3';
 const OUTGOING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
 const STATIC_RUMIK_OPENING_SRC = '/assets/audio/rumik-opening.wav';
+const STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC = '/assets/audio/rumik-429.wav';
 const STATIC_RUMIK_FILLER_SRCS = [
   '/assets/audio/rumik-filler-2.wav',
   '/assets/audio/rumik-filler-4.wav',
@@ -560,7 +571,8 @@ async function readAgentResponseStream(
         };
       }
       if (message.event === 'error') {
-        throw new Error(typeof message.data.error === 'string' ? message.data.error : 'Agent stream failed');
+        const status = typeof message.data.status === 'number' ? message.data.status : undefined;
+        throw new AgentResponseError(typeof message.data.error === 'string' ? message.data.error : 'Agent stream failed', status);
       }
     }
 
@@ -572,7 +584,7 @@ async function readAgentResponseStream(
 
 function prefetchStaticThinkingFillerAudio() {
   if (typeof Audio === 'undefined') return;
-  STATIC_RUMIK_ALL_FILLER_SRCS.forEach((src) => {
+  [...STATIC_RUMIK_ALL_FILLER_SRCS, STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC].forEach((src) => {
     const audio = new Audio(src);
     audio.preload = 'auto';
     audio.load();
@@ -1394,8 +1406,9 @@ export function AgentCallClient() {
         const cleanup = (ok: boolean) => {
           rumikSpeakingRef.current = false;
           if (playbackId === rumikPlaybackIdRef.current && !isInactiveCallState(callStateRef.current)) {
-            callStateRef.current = 'connected';
-            setCallState('connected');
+            const nextState = respondingRef.current ? 'thinking' : 'connected';
+            callStateRef.current = nextState;
+            setCallState(nextState);
           }
           resolve(ok);
         };
@@ -1446,6 +1459,48 @@ export function AgentCallClient() {
       }
     }
   }, [appendTranscript, playRumikText, playStaticThinkingFillerAudio]);
+
+  const playRateLimitFallbackAudio = useCallback(async () => {
+    if (typeof Audio === 'undefined' || isInactiveCallState(callStateRef.current)) return false;
+
+    stopRumikAudio();
+    const playbackId = rumikPlaybackIdRef.current;
+    const audio = new Audio(STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC);
+    audio.preload = 'auto';
+    audio.setAttribute('playsInline', '');
+
+    setIsListening(false);
+    callStateRef.current = 'speaking';
+    setCallState('speaking');
+    rumikSpeakingRef.current = true;
+
+    logVoiceDebug('agent:rate-limit-fallback:play', { src: STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC });
+
+    const played = await new Promise<boolean>((resolve) => {
+      const cleanup = (ok: boolean) => {
+        rumikSpeakingRef.current = false;
+        if (playbackId === rumikPlaybackIdRef.current && !isInactiveCallState(callStateRef.current)) {
+          const nextState = respondingRef.current ? 'thinking' : 'connected';
+          callStateRef.current = nextState;
+          setCallState(nextState);
+        }
+        resolve(ok);
+      };
+
+      audio.onended = () => cleanup(true);
+      audio.onerror = () => cleanup(false);
+      audio.play().catch((playError) => {
+        logVoiceDebug('agent:rate-limit-fallback:play-failed', {
+          src: STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC,
+          message: playError instanceof Error ? playError.message : 'unknown',
+        });
+        cleanup(false);
+      });
+    });
+
+    if (!played) logVoiceDebug('agent:rate-limit-fallback:error', { src: STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC });
+    return played;
+  }, [stopRumikAudio]);
 
   const startImmediateVerificationFiller = useCallback(
     (reason: string, fillerKind: ThinkingFillerKind = 'verification'): Promise<void> | null => {
@@ -1814,7 +1869,10 @@ export function AgentCallClient() {
         const streamResponse = await streamResponsePromise;
         if (!streamResponse.ok || !streamResponse.body) {
           const data = await streamResponse.json().catch(() => ({}));
-          throw new Error(data?.error || 'Could not get streamed agent response');
+          throw new AgentResponseError(
+            typeof data?.error === 'string' ? data.error : 'Could not get streamed agent response',
+            streamResponse.status,
+          );
         }
 
         const chunkBuffer = createRumikChunkBuffer();
@@ -1960,6 +2018,9 @@ export function AgentCallClient() {
         const message = agentError instanceof Error ? agentError.message : 'Agent response failed';
         logVoiceDebug('agent:error', { message });
         if (!hasQueuedStreamAudio) {
+          if (agentError instanceof AgentResponseError && agentError.status === 429) {
+            await playRateLimitFallbackAudio();
+          }
           try {
             logVoiceDebug('agent:fallback:request');
             const response = await fetch('/api/agent/respond', {
@@ -1973,7 +2034,12 @@ export function AgentCallClient() {
               }),
             });
             const data = await response.json();
-            if (!response.ok) throw new Error(data?.error || 'Could not get agent response');
+            if (!response.ok) {
+              throw new AgentResponseError(
+                typeof data?.error === 'string' ? data.error : 'Could not get agent response',
+                response.status,
+              );
+            }
             const answer = String(data.text || '').trim();
             if (data.verified) callVerifiedRef.current = true;
             if (data.verified) setVerificationStatus('verified');
@@ -1996,6 +2062,13 @@ export function AgentCallClient() {
             logVoiceDebug('agent:fallback:error', {
               message: fallbackError instanceof Error ? fallbackError.message : 'Fallback agent response failed',
             });
+            if (
+              fallbackError instanceof AgentResponseError &&
+              fallbackError.status === 429 &&
+              !(agentError instanceof AgentResponseError && agentError.status === 429)
+            ) {
+              await playRateLimitFallbackAudio();
+            }
           }
         }
         setError(message);
@@ -2016,6 +2089,7 @@ export function AgentCallClient() {
       cancelDelayedPostSpeechFiller,
       endCall,
       playRumikText,
+      playRateLimitFallbackAudio,
       playThinkingFillerAudio,
       session,
       startImmediateVerificationFiller,
