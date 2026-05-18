@@ -2017,9 +2017,10 @@ export function AgentCallClient() {
         }
         const message = agentError instanceof Error ? agentError.message : 'Agent response failed';
         logVoiceDebug('agent:error', { message });
+        let rateLimitFallbackPlayed = false;
         if (!hasQueuedStreamAudio) {
           if (agentError instanceof AgentResponseError && agentError.status === 429) {
-            await playRateLimitFallbackAudio();
+            rateLimitFallbackPlayed = await playRateLimitFallbackAudio();
           }
           try {
             logVoiceDebug('agent:fallback:request');
@@ -2067,9 +2068,16 @@ export function AgentCallClient() {
               fallbackError.status === 429 &&
               !(agentError instanceof AgentResponseError && agentError.status === 429)
             ) {
-              await playRateLimitFallbackAudio();
+              rateLimitFallbackPlayed = await playRateLimitFallbackAudio();
             }
           }
+        }
+        if (rateLimitFallbackPlayed) {
+          setError('');
+          setInterimText('');
+          callStateRef.current = 'connected';
+          setCallState('connected');
+          return;
         }
         setError(message);
         setCallState('error');
