@@ -115,80 +115,80 @@ test('stable intent policy maps user intents to fixed auth tiers and tools', () 
   });
 });
 
-test('routeStableIntent never classifies user turns with local keyword matching', () => {
+test('routeStableIntent classifies common user turns with local keyword matching', () => {
   assert.deepEqual(routeStableIntent('Mera payment debit hua but FD nahi bana'), {
-    intent: 'unknown',
-    authTier: 'Tier A',
-    tools: [],
+    intent: 'payment.failed',
+    authTier: 'Tier B',
+    tools: ['verify_read_access', 'get_payment_reconciliation_status'],
   });
   assert.deepEqual(routeStableIntent('मेरा पेमेंट फेल हो गया है'), {
-    intent: 'unknown',
-    authTier: 'Tier A',
-    tools: [],
+    intent: 'payment.failed',
+    authTier: 'Tier B',
+    tools: ['verify_read_access', 'get_payment_reconciliation_status'],
   });
   assert.deepEqual(routeStableIntent('میرا پیمنٹ فیل ہو گیا ہے'), {
-    intent: 'unknown',
-    authTier: 'Tier A',
-    tools: [],
+    intent: 'payment.failed',
+    authTier: 'Tier B',
+    tools: ['verify_read_access', 'get_payment_reconciliation_status'],
   });
   assert.deepEqual(routeStableIntent('Stable Money real hai kya, DICGC hai?'), {
-    intent: 'unknown',
+    intent: 'app.real.check',
     authTier: 'Tier A',
-    tools: [],
+    tools: ['get_trust_facts', 'get_disclosure_copy'],
   });
 });
 
-test('routeStableIntent does not locally classify general KYC explainers', () => {
+test('routeStableIntent locally classifies general KYC explainers', () => {
   assert.deepEqual(routeStableIntent('What is KYC?'), {
-    intent: 'unknown',
+    intent: 'kyc.explainer',
     authTier: 'Tier A',
     tools: [],
   });
   assert.deepEqual(routeStableIntent('KYC kya hota hai?'), {
-    intent: 'unknown',
+    intent: 'kyc.explainer',
     authTier: 'Tier A',
     tools: [],
   });
 });
 
-test('routeStableTurn does not infer verification follow-ups with local keyword matching', () => {
+test('routeStableTurn preserves active intent during verification follow-ups', () => {
   assert.deepEqual(
     routeStableTurn('3210', [
       { role: 'user', text: 'Mera KYC status batao' },
       { role: 'model', text: 'Verification ke liye mobile number ke last four digits bata dijiye.' },
     ]),
     {
-      intent: 'unknown',
-      authTier: 'Tier A',
-      tools: [],
+      intent: 'kyc.status',
+      authTier: 'Tier B',
+      tools: ['verify_read_access', 'get_kyc_status'],
     },
   );
 
   assert.deepEqual(
     routeStableTurn('14 August 1991', [
-      { role: 'user', text: 'Mera payment status batao' },
+      { role: 'user', text: 'Mera KYC status batao' },
       { role: 'model', text: 'Verification ke liye mobile number ke last four digits bata dijiye.' },
       { role: 'user', text: '3210' },
       { role: 'model', text: 'Kripya date of birth batayein.' },
     ]),
     {
-      intent: 'unknown',
-      authTier: 'Tier A',
-      tools: [],
+      intent: 'kyc.status',
+      authTier: 'Tier B',
+      tools: ['verify_read_access', 'get_kyc_status'],
     },
   );
 
   assert.deepEqual(
     routeStableTurn('august fourteenth', [
-      { role: 'user', text: 'Mera payment status batao' },
+      { role: 'user', text: 'Mera KYC status batao' },
       { role: 'model', text: 'Verification ke liye mobile number ke last four digits bata dijiye.' },
       { role: 'user', text: '3210' },
       { role: 'model', text: 'Kripya date of birth batayein.' },
     ]),
     {
-      intent: 'unknown',
-      authTier: 'Tier A',
-      tools: [],
+      intent: 'kyc.status',
+      authTier: 'Tier B',
+      tools: ['verify_read_access', 'get_kyc_status'],
     },
   );
 });
@@ -572,6 +572,7 @@ test('executeStableToolWithContext accepts DOB when AI says match (mocked)', asy
     );
     assert.equal(result.ok, true);
     assert.equal(result.data?.verified, true);
+    assert.match(result.summary, /date of birth verification/i);
   } finally {
     if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = priorKey;

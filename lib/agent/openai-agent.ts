@@ -1,4 +1,4 @@
-﻿import type { PersonaSeed } from '@/lib/personas';
+import type { PersonaSeed } from '@/lib/personas';
 import {
   executeStableToolWithContext,
   getStableToolAuthTier,
@@ -258,6 +258,33 @@ function accountToolsForRoute(route: StableIntentRoute): string[] {
 
 function pendingAccountToolAfterVerification(route: StableIntentRoute, toolCalls: string[]): string | null {
   return accountToolsForRoute(route).find((tool) => !toolCalls.includes(tool)) ?? null;
+}
+
+/**
+ * Returns tools that can be pre-executed based on the resolved intent route
+ * and current verification state. These tools are safe to run immediately
+ * without waiting for the LLM to decide â€” the intent already tells us
+ * exactly which tools are needed from STABLE_INTENT_POLICIES.
+ *
+ * Returns empty array when pre-execution is not applicable, signaling the
+ * caller to use the normal LLM-driven tool-call flow.
+ */
+const NEVER_PREEXEC_TOOLS = new Set([
+  'verify_read_access',      // needs AI to extract mobile/DOB from user transcript
+  'create_support_ticket',   // needs user-provided issue summary as arguments
+  'send_secure_link',        // needs user confirmation before sending
+]);
+
+function getPreExecutableTools(route: StableIntentRoute, callVerified: boolean): string[] {
+  if (route.intent === 'unknown') return [];
+  if (route.intent === 'conversation.goodbye') return [];
+  if (route.intent === 'kyc.explainer') return [];
+
+  const needsAuth = route.authTier === 'Tier B' || route.authTier === 'Tier C';
+  if (needsAuth && !callVerified) return [];
+
+  const tools = route.tools.filter((t) => !NEVER_PREEXEC_TOOLS.has(t));
+  return tools;
 }
 
 function lastModelText(history: AgentHistoryMessage[]): string {
@@ -623,8 +650,8 @@ function normalizeToolArgsForExecution(
  *     the caller utterance into date_of_birth.
  *
  * The server-side AI matchers decide whether the slot content matches the
- * record (multilingual, multi-script, "double X", "ek do teen", "ون ون ٹو
- * تھری", etc.). We deliberately avoid any in-process digit or language
+ * record (multilingual, multi-script, "double X", "ek do teen", "ÙˆÙ† ÙˆÙ† Ù¹Ùˆ
+ * ØªÚ¾Ø±ÛŒ", etc.). We deliberately avoid any in-process digit or language
  * parsing.
  */
 function normalizeVerifyReadAccessArgs(
@@ -658,6 +685,20 @@ function normalizeHinglishDobAsk(text: string): string {
   return text
     .replace(/Kripya date of birth batayein/gi, 'Apni date of birth batayein')
     .replace(/Kripya date of birth/gi, 'Apni date of birth');
+}
+
+function ensureDobVerificationAcknowledgement(text: string): string {
+  const trimmed = text.trim();
+  if (/date of birth verification|date of birth.*verified|verified.*date of birth/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  const acknowledgement = 'Mobile verification aur date of birth verification complete ho gayi hai.';
+  const toneMatch = trimmed.match(/^(\[[a-z]+\]\s*)/i);
+  if (toneMatch) {
+    return `${toneMatch[1]}${acknowledgement} ${trimmed.slice(toneMatch[1].length).trim()}`.trim();
+  }
+  return `[neutral] ${acknowledgement} ${trimmed}`.trim();
 }
 
 async function createOpenAIResponse(apiKey: string, requestBody: OpenAIResponseRequest): Promise<OpenAIResponse> {
@@ -909,6 +950,7 @@ export async function runStableAgent(
   let stripToolsAfterEmpty3 = false;
   let longHistoryRecovery = (input.history?.length ?? 0) >= 8;
   let forceTextOnlyNextRound = false;
+  let mustAcknowledgeDobVerification = false;
 
   for (let round = 0; round < 24; round += 1) {
     const merged: BuildOpenAIResponseRequestInput = { ...mergedBase, callVerified: verifiedRef.current };
@@ -994,7 +1036,11 @@ export async function runStableAgent(
         continue;
       }
       consecutiveEmpty = 0;
-      return { text, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      return {
+        text: mustAcknowledgeDobVerification ? ensureDobVerificationAcknowledgement(text) : text,
+        toolCalls: [...toolCalls],
+        verified: verifiedRef.current,
+      };
     }
 
     if (!fc && !text) {
@@ -1031,7 +1077,11 @@ export async function runStableAgent(
       if (fc.name === 'verify_read_access' && verifiedRef.current && forceNoTools) {
         const textOnly = extractOpenAIText(json);
         if (textOnly) {
-          return { text: textOnly, toolCalls: [...toolCalls], verified: verifiedRef.current };
+          return {
+            text: mustAcknowledgeDobVerification ? ensureDobVerificationAcknowledgement(textOnly) : textOnly,
+            toolCalls: [...toolCalls],
+            verified: verifiedRef.current,
+          };
         }
         continue;
       }
@@ -1072,6 +1122,9 @@ export async function runStableAgent(
         (toolResult.ok && process.env.STABLE_DISABLE_AI_DOB === '1' && toolResult.data?.verification_step === 'complete')
       ) {
         verifiedRef.current = true;
+        if (toolResult.data?.verification_step === 'complete') {
+          mustAcknowledgeDobVerification = true;
+        }
       }
       if (toolResult.ok) {
         consecutiveVerifyToolCalls += 1;
@@ -1188,9 +1241,9 @@ export async function streamStableAgentText(
 
     let streamPasses = 0;
     const runOneStream = async (
-      onDelta?: (delta: string) => void,
-      onDebug?: (event: AgentDebugEvent) => void,
-      options: { suppressTools?: boolean } = {},
+      onStreamDelta?: (delta: string) => void,
+      onStreamDebug?: (event: AgentDebugEvent) => void,
+      options: { suppressTools?: boolean; emitDeltasLive?: boolean } = {},
     ): Promise<{
       textDeltas: string[];
       incomplete: boolean;
@@ -1239,7 +1292,7 @@ export async function streamStableAgentText(
       });
       const stream = await createOpenAIResponseStream(apiKey, request);
       emitTiming('openai_stream_response_ready', { pass });
-      onDebug?.({ type: 'stream', event: { type: 'start' } });
+      onStreamDebug?.({ type: 'stream', event: { type: 'start' } });
       const state: StreamState = { textDeltas: [], incompleteFromStream: false, serverError: false };
       let sawFirstEvent = false;
       await readSseStream(stream, (ev) => {
@@ -1250,7 +1303,7 @@ export async function streamStableAgentText(
             eventType: typeof ev.type === 'string' ? ev.type : 'unknown',
           });
         }
-        applyStreamEvent(state, ev, onDelta, onDebug);
+        applyStreamEvent(state, ev, options.emitDeltasLive === true ? onStreamDelta : undefined, onStreamDebug);
       });
       emitTiming('openai_stream_end', {
         pass,
@@ -1259,7 +1312,7 @@ export async function streamStableAgentText(
         serverError: state.serverError,
         streamedFunction: state.activeFunction?.name,
       });
-      onDebug?.({ type: 'stream', event: { type: 'end', textDeltas: state.textDeltas.length } });
+      onStreamDebug?.({ type: 'stream', event: { type: 'end', textDeltas: state.textDeltas.length } });
 
       if (state.serverError) {
         return { textDeltas: [], incomplete: false, serverError: true };
@@ -1288,8 +1341,6 @@ export async function streamStableAgentText(
         serverError: false,
       };
     };
-
-    const pass1 = await runOneStream(undefined, onDebug);
 
     const recoverTextWithoutStreaming = async (
       maxOutputTokens: number,
@@ -1323,9 +1374,114 @@ export async function streamStableAgentText(
       return normalizeHinglishDobAsk(extractOpenAIText(json));
     };
 
+
+    // â”€â”€ Speculative pre-execution fast path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // When the intent is known and the user is verified (or Tier A), we
+    // already know which data tool the LLM would call. Execute it NOW in
+    // code, inject the result into the messages, and make a single
+    // streaming LLM call (compose-only) instead of the normal 2-call flow
+    // (LLM decides tool â†’ tool exec â†’ LLM composes answer).
+    // This saves ~1.5-2s per turn.
+    const preExecTools = getPreExecutableTools(route, verifiedRef.current);
+    const preExecStartMs = Date.now();
+
+    if (preExecTools.length > 0) {
+      emitTiming('speculative_preexec_start', { tools: preExecTools });
+      console.log(
+        `\n\u26a1 [PREEXEC] Fast path ACTIVATED | intent=${route.intent} | tools=[${preExecTools.join(', ')}] | verified=${verifiedRef.current} | +${Date.now() - agentStartedAt}ms since agent start`,
+      );
+
+      const execCtx = buildExecutionContext(mergedBase, verifiedRef);
+
+      for (const toolName of preExecTools) {
+        const callId = `preexec_${toolName}_${toolCalls.length + 1}`;
+        const toolStartMs = Date.now();
+
+        onDebug?.({
+          type: 'tool',
+          tool: toolName,
+          phase: 'start',
+          arguments: {},
+          verified: verifiedRef.current,
+          speculative: true,
+        } as { type: 'tool'; tool: string; phase: 'start'; [k: string]: unknown });
+
+        emitTiming('tool_execution_start', { tool: toolName, speculative: true });
+        const toolResult = await executeStableToolWithContext(input.persona, toolName, {}, execCtx);
+        const toolElapsedMs = Date.now() - toolStartMs;
+        emitTiming('tool_execution_end', { tool: toolName, ok: toolResult.ok, speculative: true });
+
+        console.log(
+          `\u26a1 [PREEXEC] Tool ${toolName} done | ok=${toolResult.ok} | ${toolElapsedMs}ms | +${Date.now() - agentStartedAt}ms total`,
+        );
+
+        onDebug?.({
+          type: 'tool',
+          tool: toolName,
+          phase: 'result',
+          ok: toolResult.ok,
+          verified: verifiedRef.current,
+          speculative: true,
+        } as { type: 'tool'; tool: string; phase: 'result'; [k: string]: unknown });
+
+        toolCalls.push(toolName);
+
+        // Inject as if the LLM had called this tool itself
+        messages = [
+          ...messages,
+          { type: 'function_call', call_id: callId, name: toolName, arguments: '{}' },
+          { type: 'function_call_output', call_id: callId, output: JSON.stringify(toolResult) },
+        ];
+      }
+
+      emitTiming('speculative_preexec_end', { tools: preExecTools });
+      const preExecToolsDoneMs = Date.now() - preExecStartMs;
+      console.log(
+        `⚡ [PREEXEC] All tools done in ${preExecToolsDoneMs}ms — starting single LLM stream (no tools) | +${Date.now() - agentStartedAt}ms total`,
+      );
+
+      // Single streaming LLM call — data already in prompt, no tools needed
+      const llmStreamStartMs = Date.now();
+      const answerPass = await runOneStream(onDelta, onDebug, {
+        suppressTools: true,
+        emitDeltasLive: true,
+      });
+      const llmStreamElapsedMs = Date.now() - llmStreamStartMs;
+      const totalPreExecMs = Date.now() - preExecStartMs;
+
+      if (answerPass.serverError) {
+        console.log(`⚡ [PREEXEC] LLM stream error — recovering | ${llmStreamElapsedMs}ms LLM | ${totalPreExecMs}ms total`);
+        const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS, { suppressTools: true });
+        onDelta(recovered);
+        return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      }
+
+      const preExecText = normalizeHinglishDobAsk(answerPass.textDeltas.join('').trim());
+      if (preExecText) {
+        console.log(
+          `\n⚡ [PREEXEC] DONE | ${totalPreExecMs}ms total (tools=${preExecToolsDoneMs}ms + LLM=${llmStreamElapsedMs}ms) | deltas=${answerPass.textDeltas.length} | text=${preExecText.length} chars\n`,
+        );
+        return { text: preExecText, toolCalls: [...toolCalls], verified: verifiedRef.current };
+      }
+
+      // Edge case: streaming produced empty text — try non-streaming recovery
+      console.log(`⚡ [PREEXEC] Empty stream — recovering | ${totalPreExecMs}ms total`);
+      const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS, { suppressTools: true });
+      onDelta(recovered);
+      return { text: recovered, toolCalls: [...toolCalls], verified: verifiedRef.current };
+    }
+
+    console.log(
+      `🔄 [NORMAL] Pre-exec skipped (tools=${preExecTools.length}) | intent=${route.intent} | verified=${verifiedRef.current} | +${Date.now() - agentStartedAt}ms — using standard LLM→tool→LLM flow`,
+    );
+
+    // ——— Normal flow (unchanged) — unverified turns, unknown intents, etc. ———
+    const pass1 = await runOneStream(onDelta, onDebug, { emitDeltasLive: true });
+
     const composeToolAnswerFromAi = async (
       fc: { call_id: string; name: string; arguments: string },
       toolResult: Awaited<ReturnType<typeof executeStableToolWithContext>>,
+      options: { acknowledgeDobVerification?: boolean } = {},
     ): Promise<string> => {
       messages = [
         ...messages,
@@ -1333,20 +1489,35 @@ export async function streamStableAgentText(
         { type: 'function_call_output', call_id: fc.call_id, output: JSON.stringify(toolResult) },
       ];
 
-      const answerPass = await runOneStream(undefined, onDebug, { suppressTools: true });
+      const answerPass = await runOneStream(onDelta, onDebug, { suppressTools: true, emitDeltasLive: true });
       if (answerPass.serverError || answerPass.incomplete || answerPass.streamedFunction) {
-        const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS, { suppressTools: true });
+        const partial = normalizeHinglishDobAsk(answerPass.textDeltas.join('').trim());
+        if (partial) {
+          if (options.acknowledgeDobVerification) {
+            return ensureDobVerificationAcknowledgement(partial);
+          }
+          return partial;
+        }
+        let recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS, { suppressTools: true });
+        if (options.acknowledgeDobVerification) {
+          recovered = ensureDobVerificationAcknowledgement(recovered);
+        }
         onDelta(recovered);
         return recovered;
       }
 
-      const text = normalizeHinglishDobAsk(answerPass.textDeltas.join('').trim());
+      let text = normalizeHinglishDobAsk(answerPass.textDeltas.join('').trim());
       if (text) {
-        onDelta(text);
+        if (options.acknowledgeDobVerification) {
+          text = ensureDobVerificationAcknowledgement(text);
+        }
         return text;
       }
 
-      const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS, { suppressTools: true });
+      let recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS, { suppressTools: true });
+      if (options.acknowledgeDobVerification) {
+        recovered = ensureDobVerificationAcknowledgement(recovered);
+      }
       onDelta(recovered);
       return recovered;
     };
@@ -1494,14 +1665,18 @@ export async function streamStableAgentText(
 
           const forced = await executePendingAccountTool();
           if (forced) {
-            const forcedText = await composeToolAnswerFromAi(forced.fc, forced.result);
+            const forcedText = await composeToolAnswerFromAi(forced.fc, forced.result, {
+              acknowledgeDobVerification: true,
+            });
             return { text: forcedText, toolCalls: [...toolCalls], verified: verifiedRef.current };
           }
 
-          const spoken = await composeToolAnswerFromAi(fc, toolResult);
+          const spoken = await composeToolAnswerFromAi(fc, toolResult, { acknowledgeDobVerification: true });
           return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
         }
-        const spoken = await composeToolAnswerFromAi(fc, toolResult);
+        const spoken = await composeToolAnswerFromAi(fc, toolResult, {
+          acknowledgeDobVerification: verificationSucceeded,
+        });
         return { text: spoken, toolCalls: [...toolCalls], verified: verifiedRef.current };
       }
 
@@ -1510,6 +1685,10 @@ export async function streamStableAgentText(
     }
 
     if (pass1.incomplete && !pass1.streamedFunction) {
+      const partial = normalizeHinglishDobAsk(pass1.textDeltas.join('').trim());
+      if (partial) {
+        return { text: partial, toolCalls: [], verified: verifiedRef.current };
+      }
       const recovered = await recoverTextWithoutStreaming(AGENT_RECOVERY_MAX_OUTPUT_TOKENS);
       onDelta(recovered);
       return { text: recovered, toolCalls: [], verified: verifiedRef.current };
@@ -1523,7 +1702,6 @@ export async function streamStableAgentText(
         return { text: recovered, toolCalls: [], verified: verifiedRef.current };
       }
     }
-    pass1.textDeltas.forEach(onDelta);
     return { text: firstText, toolCalls: [], verified: verifiedRef.current };
   } finally {
     emitTiming('agent_finish');

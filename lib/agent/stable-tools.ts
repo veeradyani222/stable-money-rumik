@@ -542,7 +542,7 @@ function verifyReadAccessMobilePhase(
 function completeDobVerification(persona: PersonaSeed): StableToolResult {
   return {
     ok: true,
-    summary: '[neutral] Date of birth match ho gaya. Verification complete hai.',
+    summary: '[neutral] Mobile verification aur date of birth verification complete ho gayi hai.',
     data: {
       auth_tier: 'Tier B',
       customer_id: persona.customer_id,

@@ -15,7 +15,7 @@ test('pushRumikTextDelta emits complete speakable sentences and keeps partial te
   assert.equal(buffer.pending, '');
 });
 
-test('pushRumikTextDelta emits a long clause at a comma so first audio can start sooner', () => {
+test('pushRumikTextDelta does not split on commas mid-sentence', () => {
   const buffer = createRumikChunkBuffer();
 
   const chunks = pushRumikTextDelta(
@@ -23,8 +23,36 @@ test('pushRumikTextDelta emits a long clause at a comma so first audio can start
     '[neutral] Ji, maine aapka payment status check kar liya hai, amount partner bank se reconcile ho raha hai',
   );
 
-  assert.deepEqual(chunks, ['[neutral] Ji, maine aapka payment status check kar liya hai,']);
-  assert.equal(buffer.pending, 'amount partner bank se reconcile ho raha hai');
+  assert.deepEqual(chunks, []);
+  assert.equal(buffer.pending, '[neutral] Ji, maine aapka payment status check kar liya hai, amount partner bank se reconcile ho raha hai');
+});
+
+test('pushRumikTextDelta still emits sentence boundaries normally', () => {
+  const buffer = createRumikChunkBuffer();
+
+  const chunks = pushRumikTextDelta(
+    buffer,
+    '[neutral] Mobile verification complete ho gaya hai. Apni date of birth batayein.',
+  );
+
+  assert.deepEqual(chunks, [
+    '[neutral] Mobile verification complete ho gaya hai.',
+    'Apni date of birth batayein.',
+  ]);
+  assert.equal(buffer.pending, '');
+});
+
+test('pushRumikTextDelta uses a long-text fallback only when needed', () => {
+  const buffer = createRumikChunkBuffer();
+
+  const chunks = pushRumikTextDelta(
+    buffer,
+    '[neutral] Ji main aapka payment status check kar raha hoon aur details ko verify karne ke liye thoda aur wait kijiye please abhi main system se latest response le rahi hoon aur thoda patience rakhiyega',
+  );
+
+  assert.equal(chunks.length, 1);
+  assert.match(chunks[0], /^\[neutral\] /);
+  assert.equal(buffer.pending.length > 0, true);
 });
 
 test('flushRumikChunkBuffer emits remaining pending text once the stream ends', () => {

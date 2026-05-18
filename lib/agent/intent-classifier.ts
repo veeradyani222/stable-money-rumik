@@ -1,6 +1,7 @@
 ﻿import {
   getStableIntentPolicy,
   routeStableTurn,
+  traceStableTurnRoute,
   STABLE_INTENT_POLICIES,
   type StableAuthTier,
   type StableIntentId,
@@ -51,6 +52,7 @@ const CLASSIFIER_CACHE_LIMIT = 250;
 const CLASSIFIER_MAX_OUTPUT_TOKENS = 8000;
 const CLASSIFIER_RETRY_MAX_OUTPUT_TOKENS = 8000;
 const MAX_CLASSIFIER_INVALID_OUTPUT_ATTEMPTS = 2;
+const CLASSIFIER_HISTORY_LIMIT = 4;
 const INTENT_IDS: StableIntentId[] = [
   'payment.failed',
   'fd.book.status',
@@ -106,15 +108,28 @@ function isReasoningModel(model: string): boolean {
 
 function cacheKey(input: Pick<IntentClassifierInput, 'transcript' | 'history'>): string {
   const historyKey = input.history
-    .slice(-4)
+    .slice(-CLASSIFIER_HISTORY_LIMIT)
     .map((message) => `${message.role}:${message.text}`)
     .join('\n');
   return `${input.transcript.trim().toLowerCase()}\n---\n${historyKey.toLowerCase()}`;
 }
 
+function withClassifierHistoryWindow(input: IntentClassifierInput): IntentClassifierInput {
+  if (input.history.length <= CLASSIFIER_HISTORY_LIMIT) return input;
+  return {
+    ...input,
+    history: input.history.slice(-CLASSIFIER_HISTORY_LIMIT),
+  };
+}
+
 function transcriptPreview(transcript: string): string {
   const trimmed = transcript.trim().replace(/\s+/g, ' ');
   return trimmed.length > 120 ? `${trimmed.slice(0, 120)}...` : trimmed;
+}
+
+function routingPreview(text: string | null): string | null {
+  if (text === null) return null;
+  return transcriptPreview(text);
 }
 
 function routeLogPayload(route: StableIntentRoute): Record<string, unknown> {
@@ -228,7 +243,7 @@ function buildClassifierRequestBody(
         role: 'user',
         content: JSON.stringify({
           transcript: input.transcript,
-          recent_history: input.history.slice(-4),
+          recent_history: input.history.slice(-CLASSIFIER_HISTORY_LIMIT),
           allowed_intents: INTENT_IDS,
           intent_classification_guide: INTENT_CLASSIFICATION_GUIDE,
           fixed_policy_by_intent: STABLE_INTENT_POLICIES,
@@ -243,6 +258,8 @@ function buildClassifierRequestBody(
       'Return only the schema fields for routing. Do not answer the caller; the next agent layer creates the Roman-script spoken response for Rumik.',
       'Always use recent_history as conversation context. Treat the current transcript as the latest caller turn in that conversation, not as an isolated sentence.',
       'Preserve the active support intent from recent_history when the latest caller turn is a follow-up, correction, interruption, confirmation, verification answer, or other context-dependent continuation.',
+      'CRITICAL TOPIC-SWITCH RULE: If the latest caller turn explicitly names or references a DIFFERENT product domain or entity than the active support intent (e.g. says "payment/pe/पे/پے" when history was about KYC, or says "FD/एफडी" when history was about payments, or says "KYC/केवाईसी" when history was about FDs), that is a TOPIC SWITCH. Classify based on what the caller explicitly mentions NOW, not what history was about. The caller is changing the subject. Numbers like transaction IDs or amounts alongside a domain word reinforce the switch.',
+      'Do not preserve the active support intent when the latest caller turn is a farewell, polite decline, or "no thanks" style ending; classify that as conversation.goodbye.',
       'Short repair utterances such as "what happened?", "kya hua?", "kya ho gaya?", or "ruk gaya?" are conversation-context dependent. If recent_history shows an active support context, keep that active support context instead of treating the short repair utterance as a new unknown intent.',
       'The auth_tier is the expected tier for that intent. Application code will enforce the final auth tier and allowed tools from the fixed policy table.',
     ].join('\n'),
@@ -390,9 +407,35 @@ export async function resolveStableTurnRoute(input: IntentClassifierInput): Prom
     return cached;
   }
 
-  const deterministicFallbackRoute = routeStableTurn(input.transcript, input.history);
+  const deterministicTrace = traceStableTurnRoute(input.transcript, input.history);
+  const deterministicRoute = deterministicTrace.route;
+  if (deterministicRoute.intent !== 'unknown') {
+    console.log('[stable-intent-classifier:deterministic-hit]', {
+      transcript_preview: transcriptPreview(input.transcript),
+      normalized_transcript_preview: routingPreview(deterministicTrace.normalizedTranscript),
+      history_messages: input.history.length,
+      match_source: deterministicTrace.matchSource,
+      matched_pattern: routingPreview(deterministicTrace.matchedPattern),
+      previous_intent: deterministicTrace.previousIntent,
+      route: routeLogPayload(deterministicRoute),
+    });
+    rememberClassification(key, deterministicRoute);
+    return deterministicRoute;
+  }
+
+  const deterministicFallbackRoute = deterministicRoute;
+  console.log('[stable-intent-classifier:deterministic-miss]', {
+    transcript_preview: transcriptPreview(input.transcript),
+    normalized_transcript_preview: routingPreview(deterministicTrace.normalizedTranscript),
+    history_messages: input.history.length,
+    ai_history_messages: Math.min(input.history.length, CLASSIFIER_HISTORY_LIMIT),
+    match_source: deterministicTrace.matchSource,
+    matched_pattern: routingPreview(deterministicTrace.matchedPattern),
+    fallback_to_ai: true,
+  });
   try {
-    const classification = await classifyStableIntentWithAI(input);
+    const classifierInput = withClassifierHistoryWindow(input);
+    const classification = await classifyStableIntentWithAI(classifierInput);
     const route = classification.accepted ? classification.route : deterministicFallbackRoute;
     console.log('[stable-intent-classifier:resolved]', {
       accepted: classification.accepted,

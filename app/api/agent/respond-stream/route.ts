@@ -21,7 +21,12 @@ import {
 } from '@/lib/session-auth';
 import { createSseWriter } from './sse';
 
-function getTurnPolicyFromRoute(route: StableIntentRoute) {
+function getTurnPolicyFromRoute(input: {
+  route: StableIntentRoute;
+  callVerified: boolean;
+  verifiedMobileLast4: string | null;
+}) {
+  const { route } = input;
   const isTerminalGoodbye = route.intent === 'conversation.goodbye';
   return {
     suppressFiller: isTerminalGoodbye,
@@ -39,25 +44,6 @@ function validHistory(value: unknown): AgentHistoryMessage[] {
       return (role === 'user' || role === 'model') && typeof text === 'string' && text.trim().length > 0;
     })
     .slice(-AGENT_MAX_HISTORY_MESSAGES);
-}
-
-function transcriptPreview(transcript: string): string {
-  const trimmed = transcript.trim().replace(/\s+/g, ' ');
-  return trimmed.length > 120 ? `${trimmed.slice(0, 120)}...` : trimmed;
-}
-
-function routeLogPayload(route: StableIntentRoute | null | undefined): Record<string, unknown> | null {
-  if (!route) return null;
-  return {
-    intent: route.intent,
-    authTier: route.authTier,
-    tools: route.tools,
-  };
-}
-
-function answerPreview(text: string): string {
-  const trimmed = text.trim().replace(/\s+/g, ' ');
-  return trimmed.length > 200 ? `${trimmed.slice(0, 200)}...` : trimmed;
 }
 
 export async function POST(request: Request) {
@@ -90,16 +76,6 @@ export async function POST(request: Request) {
       : null;
     const callVerified = await getDemoCallVerifiedFromStore(pool, sessionId, callId);
     const history = validHistory((body as { history?: unknown }).history);
-    console.log('[stable-agent-api:stream-request]', {
-      session_id: sessionId,
-      call_id: String(callId ?? 'default'),
-      transcript_preview: transcriptPreview(transcript),
-      transcript_chars: transcript.length,
-      history_messages: history.length,
-      call_verified: callVerified,
-      verified_mobile_gate: verifiedMobileLast4 ?? null,
-      pending_route: routeLogPayload(pendingRoute),
-    });
     const result = await pool.query(
       `SELECT persona_id, customer_id, name, mobile_last_4, date_of_birth::text AS date_of_birth,
         kyc_status, kyc_rejection_reason, kyc_eta, kyc_next_step,
@@ -148,7 +124,14 @@ export async function POST(request: Request) {
                 writer.send('timing', debugEvent.timing);
               } else if (debugEvent.type === 'route') {
                 writer.send('route', debugEvent.route);
-                const turnPolicy = { event: 'policy', data: getTurnPolicyFromRoute(debugEvent.route) };
+                const turnPolicy = {
+                  event: 'policy',
+                  data: getTurnPolicyFromRoute({
+                    route: debugEvent.route,
+                    callVerified,
+                    verifiedMobileLast4,
+                  }),
+                };
                 writer.send(turnPolicy.event, turnPolicy.data);
               } else if (debugEvent.type === 'stream') {
                 writer.send('stream', debugEvent.event);
@@ -157,14 +140,6 @@ export async function POST(request: Request) {
               }
             },
           );
-          console.log('[stable-agent-api:stream-response]', {
-            session_id: sessionId,
-            call_id: String(callId ?? 'default'),
-            verified: answer.verified === true,
-            tool_calls: answer.toolCalls ?? [],
-            response_preview: answerPreview(answer.text || ''),
-            response_chars: (answer.text || '').length,
-          });
           if (answer.verified) await markDemoCallVerifiedInStore(pool, sessionId, callId);
           writer.send('done', answer);
         } catch (error) {

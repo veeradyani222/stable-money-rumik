@@ -929,7 +929,10 @@ test('runStableAgent can continue from DOB verification to the original account 
       toolContext: { verifiedMobileLast4: '3210' },
     });
 
-    assert.equal(result.text, '[neutral] Payment pending reconciliation mein hai.');
+    assert.equal(
+      result.text,
+      '[neutral] Mobile verification aur date of birth verification complete ho gayi hai. Payment pending reconciliation mein hai.',
+    );
     assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_payment_reconciliation_status']);
     assert.equal(result.verified, true);
     assert.equal(callCount, 2);
@@ -1001,7 +1004,10 @@ test('runStableAgent uses the matched mobile last four when DOB tool args carry 
     });
 
     assert.equal(result.verified, true);
-    assert.equal(result.text, '[neutral] Verification complete.');
+    assert.equal(
+      result.text,
+      '[neutral] Mobile verification aur date of birth verification complete ho gayi hai. Verification complete.',
+    );
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1066,7 +1072,10 @@ test('runStableAgent keeps the matched mobile last four while retrying DOB after
     });
 
     assert.equal(result.verified, true);
-    assert.equal(result.text, '[neutral] Verification complete.');
+    assert.equal(
+      result.text,
+      '[neutral] Mobile verification aur date of birth verification complete ho gayi hai. Verification complete.',
+    );
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1620,7 +1629,7 @@ test('streamStableAgentText streams OpenAI output text deltas', async () => {
   }
 });
 
-test('streamStableAgentText recovers before emitting deltas when OpenAI ends incomplete', async () => {
+test('streamStableAgentText keeps the streamed partial answer when OpenAI ends incomplete', async () => {
   const persona = getPersonaById('cust_demo_001');
   assert.ok(persona);
 
@@ -1681,11 +1690,10 @@ test('streamStableAgentText recovers before emitting deltas when OpenAI ends inc
       (delta) => chunks.push(delta),
     );
 
-    assert.deepEqual(chunks, ['[neutral] Kripya registered mobile number ke last chaar digits batayein.']);
-    assert.equal(result.text, '[neutral] Kripya registered mobile number ke last chaar digits batayein.');
-    assert.equal(requestBodies.length, 2);
+    assert.deepEqual(chunks, ['[neutral] Kripya registered mobile number ke last chaar digits batayein, main ab']);
+    assert.equal(result.text, '[neutral] Kripya registered mobile number ke last chaar digits batayein, main ab');
+    assert.equal(requestBodies.length, 1);
     assert.equal((requestBodies[0] as { stream?: boolean }).stream, true);
-    assert.equal((requestBodies[1] as { max_output_tokens?: number }).max_output_tokens, 8000);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1818,6 +1826,65 @@ test('streamStableAgentText sends account questions to OpenAI instead of bypassi
     assert.match(result.text, /last four digits/i);
     assert.deepEqual(result.toolCalls, []);
     assert.equal(chunks.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalApiKey;
+    process.env.OPENAI_AGENT_MODEL = originalModel;
+  }
+});
+
+test('streamStableAgentText emits smaller verification chunks before the final sentence ends', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalModel = process.env.OPENAI_AGENT_MODEL;
+
+  const encoded = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"[neutral] Mobile verification complete ho gaya hai. Apni date of birth batayein."}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed"}',
+      '',
+    ].join('\n'),
+  );
+
+  globalThis.fetch = (async () => {
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoded);
+          controller.close();
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
+
+  try {
+    const deltas: string[] = [];
+    const result = await streamStableAgentText(
+      {
+        persona,
+        transcript: '3210',
+        history: [
+          { role: 'user', text: 'Mera payment status batao' },
+          { role: 'model', text: '[neutral] Verification ke liye mobile number ke last four digits bata dijiye.' },
+        ],
+        route: testRoute('payment.failed'),
+      },
+      (delta) => deltas.push(delta),
+    );
+
+    assert.deepEqual(deltas, ['[neutral] Mobile verification complete ho gaya hai. Apni date of birth batayein.']);
+    assert.equal(result.text, '[neutral] Mobile verification complete ho gaya hai. Apni date of birth batayein.');
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -1987,7 +2054,7 @@ test('streamStableAgentText accepts streamed tool call ids from Responses events
     assert.equal(streamBodies.length, 3);
     assert.deepEqual(result.toolCalls, ['verify_read_access']);
     assert.equal(result.text, '[neutral] Mobile last four match ho gaya. Apni date of birth batayein.');
-    assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. Apni date of birth batayein.']);
+    assert.deepEqual(chunks, ['[neutral] Mobile last four match ho gaya. ', 'Kripya date of birth batayein.']);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -2069,7 +2136,10 @@ test('streamStableAgentText fills empty DOB verification args from the current t
     assert.equal(result.verified, true);
     assert.match(JSON.stringify(debugEvents), /"date_of_birth":"14 August 1991"/);
     assert.match(JSON.stringify(debugEvents), /"verified":true/);
-    assert.equal(result.text, '[neutral] Verification complete ho gaya.');
+    assert.equal(
+      result.text,
+      '[neutral] Mobile verification aur date of birth verification complete ho gayi hai. Verification complete ho gaya.',
+    );
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalApiKey;
@@ -2154,8 +2224,11 @@ test('streamStableAgentText executes pending route tool directly after successfu
 
     assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_fd_summary']);
     assert.equal(result.verified, true);
-    assert.equal(result.text, '[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.');
-    assert.deepEqual(chunks, [result.text]);
+    assert.equal(
+      result.text,
+      '[neutral] Mobile verification aur date of birth verification complete ho gayi hai. Bajaj Finance mein rupees thirty thousand ki FD active hai.',
+    );
+    assert.deepEqual(chunks, ['[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.']);
     assert.equal(requestBodies.length, 2);
     assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output|get_fd_summary/);
     assert.deepEqual((requestBodies.at(-1) as { tools?: unknown[] }).tools, []);
@@ -2238,8 +2311,11 @@ test('streamStableAgentText ignores checking copy and speaks pending tool summar
     );
 
     assert.deepEqual(result.toolCalls, ['verify_read_access', 'get_fd_summary']);
-    assert.equal(result.text, '[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.');
-    assert.deepEqual(chunks, [result.text]);
+    assert.equal(
+      result.text,
+      '[neutral] Mobile verification aur date of birth verification complete ho gayi hai. Bajaj Finance mein rupees thirty thousand ki FD active hai.',
+    );
+    assert.deepEqual(chunks, ['[neutral] Bajaj Finance mein rupees thirty thousand ki FD active hai.']);
     assert.equal(requestBodies.length, 2);
     assert.match(JSON.stringify(requestBodies.at(-1)), /function_call_output|get_fd_summary/);
     assert.deepEqual((requestBodies.at(-1) as { tools?: unknown[] }).tools, []);
@@ -2248,6 +2324,103 @@ test('streamStableAgentText ignores checking copy and speaks pending tool summar
     process.env.OPENAI_API_KEY = originalApiKey;
     process.env.OPENAI_AGENT_MODEL = originalModel;
     process.env.STABLE_DISABLE_AI_DOB = originalDisableAiDob;
+  }
+});
+
+test('streamStableAgentText emits the first text delta before the stream completes', async () => {
+  const persona = getPersonaById('cust_demo_001');
+  assert.ok(persona);
+
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalModel = process.env.OPENAI_AGENT_MODEL;
+
+  const firstChunk = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"[neutral] Ji, "}',
+      '',
+      '',
+    ].join('\n'),
+  );
+  const secondChunk = new TextEncoder().encode(
+    [
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"main check karti hoon."}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed"}',
+      '',
+    ].join('\n'),
+  );
+
+  let releasedSecondChunk = false;
+  let releaseSecondChunk: (() => void) | null = null;
+  const secondChunkReleased = new Promise<void>((resolve) => {
+    releaseSecondChunk = () => {
+      releasedSecondChunk = true;
+      resolve();
+    };
+  });
+
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    if (!body.stream) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          output: [{ type: 'message', content: [{ type: 'output_text', text: '[neutral] Ji, main check karti hoon.' }] }],
+        }),
+      } as Response;
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(firstChunk);
+          setTimeout(() => {
+            controller.enqueue(secondChunk);
+            controller.close();
+            releaseSecondChunk?.();
+          }, 20);
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_AGENT_MODEL = 'gpt-5.1-mini';
+
+  try {
+    const chunks: string[] = [];
+    let firstDeltaArrivedBeforeCompletion = false;
+    const resultPromise = streamStableAgentText(
+      {
+        persona,
+        transcript: 'Namaste, mujhe app samajhna hai',
+        history: [],
+      },
+      (delta) => {
+        chunks.push(delta);
+        if (chunks.length === 1) {
+          firstDeltaArrivedBeforeCompletion = !releasedSecondChunk;
+        }
+      },
+    );
+
+    await secondChunkReleased;
+    const result = await resultPromise;
+
+    assert.equal(firstDeltaArrivedBeforeCompletion, true);
+    assert.deepEqual(chunks, ['[neutral] Ji, ', 'main check karti hoon.']);
+    assert.equal(result.text, '[neutral] Ji, main check karti hoon.');
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalApiKey;
+    process.env.OPENAI_AGENT_MODEL = originalModel;
   }
 });
 

@@ -2,8 +2,7 @@ export interface RumikChunkBuffer {
   pending: string;
 }
 
-const MIN_COMMA_CHUNK_CHARS = 24;
-const MAX_CHUNK_CHARS = 100;
+const MAX_CHUNK_CHARS = 140;
 const STRONG_BOUNDARY_PATTERN = /[.!?]\s+/;
 
 export function createRumikChunkBuffer(): RumikChunkBuffer {
@@ -17,15 +16,12 @@ function findChunkBoundary(text: string): number {
     if ((char === '.' || char === '!' || char === '?') && (!next || /\s/.test(next))) {
       return index + 1;
     }
-    if (char === ',' && index + 1 >= MIN_COMMA_CHUNK_CHARS && /\s/.test(next)) {
-      return index + 1;
-    }
   }
 
   if (text.length < MAX_CHUNK_CHARS || STRONG_BOUNDARY_PATTERN.test(text)) return -1;
 
   const lastSpace = text.lastIndexOf(' ', MAX_CHUNK_CHARS);
-  return lastSpace > MIN_COMMA_CHUNK_CHARS ? lastSpace : MAX_CHUNK_CHARS;
+  return lastSpace > 0 ? lastSpace : MAX_CHUNK_CHARS;
 }
 
 export function pushRumikTextDelta(buffer: RumikChunkBuffer, delta: string): string[] {
