@@ -278,8 +278,8 @@ test('agent call client starts verification filler on speech stopped before tran
   assert.ok(delayedStartIndex < transcriptCompletedIndex);
 });
 
-test('agent call client delays post-speech fallback audio by 500ms for verified and verification turns', () => {
-  const delayConstantIndex = clientSource.indexOf('const POST_SPEECH_FILLER_DELAY_MS = 500;');
+test('agent call client delays post-speech fallback audio by 1000ms for verified and verification turns', () => {
+  const delayConstantIndex = clientSource.indexOf('const POST_SPEECH_FILLER_DELAY_MS = 1000;');
   const delayedHelperIndex = clientSource.indexOf('function shouldUseDelayedPostSpeechFiller');
   const verifiedGateIndex = clientSource.indexOf('if (input.callVerified) return true;', delayedHelperIndex);
   const timerRefIndex = clientSource.indexOf('const delayedPostSpeechFillerTimerRef = useRef<number | null>(null);');

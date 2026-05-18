@@ -1421,6 +1421,8 @@ export async function streamStableAgentText(
           phase: 'result',
           ok: toolResult.ok,
           verified: verifiedRef.current,
+          mobile_step_verified: toolResult.data?.mobile_step_verified ?? null,
+          verification_step: toolResult.data?.verification_step ?? null,
           speculative: true,
         } as { type: 'tool'; tool: string; phase: 'result'; [k: string]: unknown });
 
@@ -1569,6 +1571,8 @@ export async function streamStableAgentText(
         phase: 'result',
         ok: forcedToolResult.ok,
         verified: forcedToolResult.data?.verified === true,
+        mobile_step_verified: forcedToolResult.data?.mobile_step_verified ?? null,
+        verification_step: forcedToolResult.data?.verification_step ?? null,
       } as { type: 'tool'; tool: string; phase: 'result';[k: string]: unknown });
 
       toolCalls.push(pendingTool);
@@ -1627,6 +1631,8 @@ export async function streamStableAgentText(
         phase: 'result',
         ok: toolResult.ok,
         verified: toolResult.data?.verified === true,
+        mobile_step_verified: toolResult.data?.mobile_step_verified ?? null,
+        verification_step: toolResult.data?.verification_step ?? null,
       } as { type: 'tool'; tool: string; phase: 'result';[k: string]: unknown });
 
       toolCalls.push(fc.name);

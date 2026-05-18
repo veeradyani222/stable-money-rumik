@@ -751,9 +751,13 @@
 
 .transcript-strip {
   margin-top: auto;
-  max-height: 34vh;
-  overflow: auto;
-  padding: 14px 18px;
+  flex: 0 1 min(46vh, 420px);
+  min-height: 180px;
+  max-height: min(46vh, 420px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 14px 18px 32px;
   background: var(--surface-raised);
   border-top: 1px solid var(--border);
 }
@@ -771,6 +775,42 @@
 
 .transcript-line--agent strong {
   color: var(--primary);
+}
+
+.verification-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  margin-bottom: 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+}
+
+.verification-badge--checking {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+.verification-badge--mobile_matched {
+  background: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+}
+
+.verification-badge--mobile_failed,
+.verification-badge--dob_failed {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
+
+.verification-badge--verified {
+  background: #d1fae5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
 }
 
 .agent-error-panel {

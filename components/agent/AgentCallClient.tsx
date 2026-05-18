@@ -93,6 +93,8 @@ interface AgentTurnPolicy {
   endCallAfterResponse?: boolean;
 }
 
+type VerificationStatus = 'none' | 'checking' | 'mobile_matched' | 'mobile_failed' | 'dob_failed' | 'verified';
+
 const RUMIK_LEADING_SILENCE_RMS_THRESHOLD = 0.004;
 const RUMIK_MAX_LEADING_SILENCE_DROPS = 20;
 const RUMIK_TTS_FIRST_AUDIO_TIMEOUT_MS = 7000;
@@ -138,7 +140,7 @@ const STATIC_OPENING_ECHO_DELTA_RMS = 0.022;
 const STATIC_OPENING_ECHO_MULTIPLIER = 2.4;
 const NEAR_SIMULTANEOUS_UTTERANCE_WINDOW_MS = 1200;
 const DUPLICATE_UTTERANCE_WINDOW_MS = 3000;
-const POST_SPEECH_FILLER_DELAY_MS = 500;
+const POST_SPEECH_FILLER_DELAY_MS = 1000;
 const SHORT_REALTIME_REPLY_PATTERN =
   /(?:^|\s)(?:yes|yeah|yep|haan|han|ha|ji|ok|okay|no|nah|nahi|na|theek)(?:\s|$)|हाँ|हां|नहीं|ठीक|جی|ہاں|نہیں|ٹھیک|হ্যাঁ|না|ঠিক|ਹਾਂ|ਨਹੀਂ|ਠੀਕ/iu;
 const SHORT_REALTIME_COMMAND_PATTERN =
@@ -498,6 +500,7 @@ async function readAgentResponseStream(
   onPolicy?: (policy: AgentTurnPolicy) => void,
   onTiming?: (timing: { event: string; elapsedMs?: number; details?: Record<string, unknown> }) => void,
   onStream?: (event: Record<string, unknown>) => void,
+  onTool?: (tool: Record<string, unknown>) => void,
 ): Promise<AgentStreamResult> {
   if (!response.body) throw new Error('Agent stream did not include a response body');
 
@@ -543,6 +546,9 @@ async function readAgentResponseStream(
       }
       if (message.event === 'stream') {
         onStream?.(message.data);
+      }
+      if (message.event === 'tool') {
+        onTool?.(message.data);
       }
       if (message.event === 'done') {
         result = {
@@ -633,7 +639,9 @@ export function AgentCallClient() {
   const [personaChangeError, setPersonaChangeError] = useState('');
   const [personaChangeSubmittingId, setPersonaChangeSubmittingId] = useState<string | null>(null);
   const [detailPersona, setDetailPersona] = useState<PersonaSeed | null>(null);
+  const [verificationStatus, setVerificationStatus] = useState<VerificationStatus>('none');
   const agentSidebarResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const transcriptStripRef = useRef<HTMLDivElement>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -694,6 +702,7 @@ export function AgentCallClient() {
   const latestMicRmsRef = useRef(0);
   const activeVoiceTimingTurnRef = useRef<VoiceTimingTurn | null>(null);
   const callAbortRef = useRef<AbortController | null>(null);
+  const rumikAnswerStreamActiveRef = useRef(false);
 
   const syncMicrophoneRecorder = useCallback((nextMuted: boolean, nextCallState: CallState) => {
     const recorder = mediaRecorderRef.current;
@@ -749,6 +758,11 @@ export function AgentCallClient() {
       }, 100);
     }
   }, [callState]);
+
+  useEffect(() => {
+    const el = transcriptStripRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [transcript]);
 
   useEffect(() => {
     prefetchStaticThinkingFillerAudio();
@@ -915,11 +929,11 @@ export function AgentCallClient() {
   const appendTranscript = useCallback((role: TranscriptLine['role'], text: string) => {
     const cleanText = text.trim();
     if (!cleanText) return;
-    setTranscript((lines) => [...lines.slice(-8), { role, text: cleanText }]);
+    setTranscript((lines) => [...lines.slice(-50), { role, text: cleanText }]);
   }, []);
 
   const finishRumikPlaybackTurn = useCallback(() => {
-    if (!rumikStreamDoneRef.current || pendingRumikRequestsRef.current > 0 || pendingRumikSourcesRef.current > 0) return;
+    if (rumikAnswerStreamActiveRef.current || !rumikStreamDoneRef.current || pendingRumikRequestsRef.current > 0 || pendingRumikSourcesRef.current > 0) return;
 
     rumikSpeakingRef.current = false;
     rumikDoneRef.current?.();
@@ -1661,6 +1675,7 @@ export function AgentCallClient() {
     setIsListening(false);
     closeRumikSocket();
     callVerifiedRef.current = false;
+    rumikAnswerStreamActiveRef.current = false;
     immediateVerificationFillerRef.current = null;
     cancelDelayedPostSpeechFiller();
     callIdRef.current = '';
@@ -1669,6 +1684,7 @@ export function AgentCallClient() {
     setCallState('idle');
     setDuration(0);
     setInterimText('');
+    setVerificationStatus('none');
   }, [cancelDelayedPostSpeechFiller, closeRumikSocket]);
 
   const askAgent = useCallback(
@@ -1792,6 +1808,7 @@ export function AgentCallClient() {
       }
       warmRumikSocket();
       let hasQueuedStreamAudio = false;
+      rumikAnswerStreamActiveRef.current = true;
 
       try {
         const streamResponse = await streamResponsePromise;
@@ -1874,6 +1891,29 @@ export function AgentCallClient() {
           (event) => {
             logVoiceDebug('agent:stream:event', event);
           },
+          (toolEvent) => {
+            logVoiceDebug('agent:stream:tool', toolEvent);
+            const toolName = typeof toolEvent.tool === 'string' ? toolEvent.tool : '';
+            const phase = typeof toolEvent.phase === 'string' ? toolEvent.phase : '';
+            if (toolName === 'verify_read_access') {
+              if (phase === 'call') {
+                setVerificationStatus('checking');
+              } else if (phase === 'result') {
+                const ok = toolEvent.ok === true;
+                const verified = toolEvent.verified === true;
+                const mobileStepVerified = toolEvent.mobile_step_verified === true;
+                if (verified) {
+                  setVerificationStatus('verified');
+                } else if (ok && mobileStepVerified) {
+                  setVerificationStatus('mobile_matched');
+                } else if (!ok && mobileStepVerified) {
+                  setVerificationStatus('dob_failed');
+                } else if (!ok) {
+                  setVerificationStatus('mobile_failed');
+                }
+              }
+            }
+          },
         );
 
         const tail = flushRumikChunkBuffer(chunkBuffer);
@@ -1881,6 +1921,7 @@ export function AgentCallClient() {
 
         const answer = String(data.text || streamedText).trim();
         if (data.verified) callVerifiedRef.current = true;
+        if (data.verified) setVerificationStatus('verified');
         if (!hasQueuedStreamAudio && answer) {
           logVoiceDebug('agent:stream:done-answer-speakable', {
             answerChars: answer.length,
@@ -1902,12 +1943,15 @@ export function AgentCallClient() {
         historyRef.current = nextHistory.slice(-AGENT_CLIENT_HISTORY_LIMIT);
         appendTranscript('agent', answer);
         await Promise.all([thinkingFillerPlayback, playbackQueue]);
+        rumikAnswerStreamActiveRef.current = false;
+        finishRumikPlaybackTurn();
         await waitForRumikPlaybackTurn();
         if (data.endCallAfterResponse && !isInactiveCallState(callStateRef.current)) {
           endCall();
         }
         agentAbortControllerRef.current = null;
       } catch (agentError) {
+        rumikAnswerStreamActiveRef.current = false;
         if (agentError instanceof Error && agentError.name === 'AbortError') {
           logVoiceDebug('agent:request:aborted', { message: agentError.message });
           agentAbortControllerRef.current = null;
@@ -1932,6 +1976,7 @@ export function AgentCallClient() {
             if (!response.ok) throw new Error(data?.error || 'Could not get agent response');
             const answer = String(data.text || '').trim();
             if (data.verified) callVerifiedRef.current = true;
+            if (data.verified) setVerificationStatus('verified');
             logVoiceDebug('agent:fallback:response', { status: response.status, text: answer, toolCalls: data.toolCalls ?? [] });
             const fallbackHistory: HistoryMessage[] = [
               ...historyRef.current,
@@ -2235,8 +2280,10 @@ export function AgentCallClient() {
     setError('');
     setDuration(0);
     setTranscript([]);
+    setVerificationStatus('none');
     historyRef.current = [];
     callVerifiedRef.current = false;
+    rumikAnswerStreamActiveRef.current = false;
     immediateVerificationFillerRef.current = null;
     callIdRef.current =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -2782,7 +2829,16 @@ export function AgentCallClient() {
           </div>
         )}
 
-        <div className="transcript-strip">
+        <div className="transcript-strip" ref={transcriptStripRef}>
+          {verificationStatus !== 'none' && (
+            <div className={`verification-badge verification-badge--${verificationStatus}`}>
+              {verificationStatus === 'checking' && 'Verifying identity...'}
+              {verificationStatus === 'mobile_matched' && 'Mobile verified — DOB needed'}
+              {verificationStatus === 'mobile_failed' && 'Mobile mismatch — try again'}
+              {verificationStatus === 'dob_failed' && 'DOB mismatch — try again'}
+              {verificationStatus === 'verified' && 'Identity verified'}
+            </div>
+          )}
           {transcript.map((line, index) => (
             <p key={`${line.role}-${index}`} className={`transcript-line transcript-line--${line.role}`}>
               <strong>{line.role === 'agent' ? 'Stable Assist' : line.role === 'user' ? 'You' : 'System'}:</strong> {line.text}

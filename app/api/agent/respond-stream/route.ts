@@ -136,7 +136,8 @@ export async function POST(request: Request) {
               } else if (debugEvent.type === 'stream') {
                 writer.send('stream', debugEvent.event);
               } else {
-                writer.send('tool', debugEvent.tool);
+                const { type: _eventType, ...toolData } = debugEvent;
+                writer.send('tool', toolData);
               }
             },
           );
