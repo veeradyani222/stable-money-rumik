@@ -1415,13 +1415,12 @@ export function AgentCallClient() {
       });
     }
     const selectedIndex = Math.floor(Math.random() * STATIC_RUMIK_ALL_FILLER_SRCS.length);
-    const text = STABLE_THINKING_FILLERS[selectedIndex];
-    const transcriptText = stripTranscriptToneTag(text);
-
-    appendTranscript('agent', transcriptText);
+    const text = STABLE_THINKING_FILLERS[selectedIndex % STABLE_THINKING_FILLERS.length];
 
     try {
       if (await playStaticThinkingFillerAudio(selectedIndex, fillerKind)) return;
+      const transcriptText = stripTranscriptToneTag(text);
+      appendTranscript('agent', transcriptText);
       await playRumikText(text, { trimLeadingSilence: false });
     } finally {
       if (timingTurn) {

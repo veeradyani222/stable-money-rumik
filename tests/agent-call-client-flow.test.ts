@@ -155,6 +155,21 @@ test('agent call client uses every static filler asset for verification and main
   assert.match(clientSource, /rumik-main-filler-1\.wav/);
 });
 
+test('agent call client does not print static filler copy that can mismatch the WAV', () => {
+  const playFillerIndex = clientSource.indexOf('const playThinkingFillerAudio = useCallback');
+  const staticAttemptIndex = clientSource.indexOf('await playStaticThinkingFillerAudio(selectedIndex, fillerKind)', playFillerIndex);
+  const appendIndex = clientSource.indexOf("appendTranscript('agent', transcriptText);", playFillerIndex);
+  const liveFallbackIndex = clientSource.indexOf('await playRumikText(text, { trimLeadingSilence: false })', playFillerIndex);
+
+  assert.notEqual(playFillerIndex, -1);
+  assert.notEqual(staticAttemptIndex, -1);
+  assert.notEqual(appendIndex, -1);
+  assert.notEqual(liveFallbackIndex, -1);
+  assert.ok(staticAttemptIndex < appendIndex);
+  assert.ok(appendIndex < liveFallbackIndex);
+  assert.match(clientSource.slice(playFillerIndex, liveFallbackIndex), /selectedIndex % STABLE_THINKING_FILLERS\.length/);
+});
+
 test('static thinking fillers are unique stable copy variants', () => {
   const fillerBlockMatch = clientSource.match(/const STABLE_THINKING_FILLERS = \[([\s\S]*?)\] as const;/);
   assert.ok(fillerBlockMatch);
