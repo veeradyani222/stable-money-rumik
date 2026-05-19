@@ -65,121 +65,29 @@ test('agent call client does not prefetch generated opening audio', () => {
   assert.doesNotMatch(clientSource, /rumik:opening-cache/);
 });
 
-test('agent call client does not prefetch generated thinking filler audio', () => {
-  assert.match(clientSource, /STABLE_THINKING_FILLERS/);
+test('agent call client does not include thinking filler audio paths or generated filler copy', () => {
+  assert.doesNotMatch(clientSource, /STABLE_THINKING_FILLERS/);
+  assert.doesNotMatch(clientSource, /STATIC_RUMIK_(?:ALL_)?FILLER_SRCS/);
+  assert.doesNotMatch(clientSource, /STATIC_RUMIK_MAIN_FILLER_SRCS/);
+  assert.doesNotMatch(clientSource, /rumik-(?:main-)?filler-\d+\.wav/);
+  assert.doesNotMatch(clientSource, /ThinkingFillerKind/);
   assert.doesNotMatch(clientSource, /prefetchThinkingFillerAudio/);
   assert.doesNotMatch(clientSource, /prefetchAudioCache/);
   assert.doesNotMatch(clientSource, /thinkingFillerAudioCaches/);
   assert.doesNotMatch(clientSource, /rumik:thinking-filler-cache/);
 });
 
-test('agent call client uses static thinking filler assets before live Rumik fallback', () => {
-  const srcIndex = clientSource.indexOf('const STATIC_RUMIK_ALL_FILLER_SRCS = [');
-  const playStaticIndex = clientSource.indexOf('const playStaticThinkingFillerAudio = useCallback');
-  const playFillerIndex = clientSource.indexOf('const playThinkingFillerAudio = useCallback');
-  const staticAttemptIndex = clientSource.indexOf('await playStaticThinkingFillerAudio(selectedIndex, fillerKind)', playFillerIndex);
-  const liveAttemptIndex = clientSource.indexOf('await playRumikText(text, { trimLeadingSilence: false })', playFillerIndex);
-
-  assert.notEqual(srcIndex, -1);
-  assert.notEqual(playStaticIndex, -1);
-  assert.notEqual(playFillerIndex, -1);
-  assert.notEqual(staticAttemptIndex, -1);
-  assert.notEqual(liveAttemptIndex, -1);
-  assert.ok(playStaticIndex < playFillerIndex);
-  assert.ok(staticAttemptIndex < liveAttemptIndex);
-  assert.doesNotMatch(clientSource.slice(playFillerIndex, liveAttemptIndex), /playCachedAudioChunks/);
-});
-
-test('static thinking filler assets exist as 24 kHz mono PCM WAV files', () => {
-  const fillerBlockMatch = clientSource.match(/const STATIC_RUMIK_FILLER_SRCS = \[([\s\S]*?)\] as const;/);
-  assert.ok(fillerBlockMatch);
-  const sources = [...fillerBlockMatch[1].matchAll(/'\/assets\/audio\/([^']+)'/g)].map((match) => match[1]);
-
-  assert.ok(sources.length >= 1);
-  for (const source of sources) {
-    const assetPath = path.join(process.cwd(), 'public', 'assets', 'audio', source);
-    const bytes = fs.readFileSync(assetPath);
-
-    assert.equal(Buffer.from(bytes.subarray(0, 4)).toString('ascii'), 'RIFF');
-    assert.equal(Buffer.from(bytes.subarray(8, 12)).toString('ascii'), 'WAVE');
-    assert.equal(bytes.readUInt16LE(22), 1);
-    assert.equal(bytes.readUInt32LE(24), 24000);
-    assert.equal(bytes.readUInt16LE(34), 16);
-    assert.ok(bytes.length > 44);
-  }
-});
-
-test('static main thinking filler assets exist as 24 kHz mono PCM WAV files', () => {
-  const fillerBlockMatch = clientSource.match(/const STATIC_RUMIK_MAIN_FILLER_SRCS = \[([\s\S]*?)\] as const;/);
-  assert.ok(fillerBlockMatch);
-  const sources = [...fillerBlockMatch[1].matchAll(/'\/assets\/audio\/([^']+)'/g)].map((match) => match[1]);
-
-  assert.ok(sources.length >= 1);
-  for (const source of sources) {
-    const assetPath = path.join(process.cwd(), 'public', 'assets', 'audio', source);
-    const bytes = fs.readFileSync(assetPath);
-
-    assert.equal(Buffer.from(bytes.subarray(0, 4)).toString('ascii'), 'RIFF');
-    assert.equal(Buffer.from(bytes.subarray(8, 12)).toString('ascii'), 'WAVE');
-    assert.equal(bytes.readUInt16LE(22), 1);
-    assert.equal(bytes.readUInt32LE(24), 24000);
-    assert.equal(bytes.readUInt16LE(34), 16);
-    assert.ok(bytes.length > 44);
-  }
-});
-
-test('agent call client uses every static filler asset for verification and main turns', () => {
-  const verificationSrcIndex = clientSource.indexOf('const STATIC_RUMIK_FILLER_SRCS = [');
-  const mainSrcIndex = clientSource.indexOf('const STATIC_RUMIK_MAIN_FILLER_SRCS = [');
-  const allSrcIndex = clientSource.indexOf('const STATIC_RUMIK_ALL_FILLER_SRCS = [');
-  const playFillerIndex = clientSource.indexOf('const playThinkingFillerAudio = useCallback');
-  const verificationCallIndex = clientSource.indexOf("playThinkingFillerAudio('verification')", playFillerIndex);
-  const mainCallIndex = clientSource.indexOf('thinkingFillerPlayback = playThinkingFillerAudio()', playFillerIndex);
-  const combinedCountIndex = clientSource.indexOf('const selectedIndex = Math.floor(Math.random() * STATIC_RUMIK_ALL_FILLER_SRCS.length);', playFillerIndex);
-  const branchedSourceIndex = clientSource.indexOf("fillerKind === 'verification' ? STATIC_RUMIK_FILLER_SRCS : STATIC_RUMIK_MAIN_FILLER_SRCS", playFillerIndex);
-
-  assert.notEqual(verificationSrcIndex, -1);
-  assert.notEqual(mainSrcIndex, -1);
-  assert.notEqual(allSrcIndex, -1);
-  assert.notEqual(playFillerIndex, -1);
-  assert.notEqual(verificationCallIndex, -1);
-  assert.notEqual(mainCallIndex, -1);
-  assert.ok(verificationSrcIndex < mainSrcIndex);
-  assert.ok(mainSrcIndex < allSrcIndex);
-  assert.ok(playFillerIndex < verificationCallIndex);
-  assert.ok(playFillerIndex < mainCallIndex);
-  assert.notEqual(combinedCountIndex, -1);
-  assert.equal(branchedSourceIndex, -1);
-  assert.match(clientSource, /\.\.\.STATIC_RUMIK_FILLER_SRCS/);
-  assert.match(clientSource, /\.\.\.STATIC_RUMIK_MAIN_FILLER_SRCS/);
-  assert.match(clientSource, /rumik-main-filler-1\.wav/);
-});
-
-test('agent call client does not print static filler copy that can mismatch the WAV', () => {
-  const playFillerIndex = clientSource.indexOf('const playThinkingFillerAudio = useCallback');
-  const staticAttemptIndex = clientSource.indexOf('await playStaticThinkingFillerAudio(selectedIndex, fillerKind)', playFillerIndex);
-  const appendIndex = clientSource.indexOf("appendTranscript('agent', transcriptText);", playFillerIndex);
-  const liveFallbackIndex = clientSource.indexOf('await playRumikText(text, { trimLeadingSilence: false })', playFillerIndex);
-
-  assert.notEqual(playFillerIndex, -1);
-  assert.notEqual(staticAttemptIndex, -1);
-  assert.notEqual(appendIndex, -1);
-  assert.notEqual(liveFallbackIndex, -1);
-  assert.ok(staticAttemptIndex < appendIndex);
-  assert.ok(appendIndex < liveFallbackIndex);
-  assert.match(clientSource.slice(playFillerIndex, liveFallbackIndex), /selectedIndex % STABLE_THINKING_FILLERS\.length/);
-});
-
-test('static thinking fillers are unique stable copy variants', () => {
-  const fillerBlockMatch = clientSource.match(/const STABLE_THINKING_FILLERS = \[([\s\S]*?)\] as const;/);
-  assert.ok(fillerBlockMatch);
-  const fillers = [...fillerBlockMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
-
-  assert.ok(fillers.length >= 2);
-  assert.equal(new Set(fillers).size, fillers.length);
-  for (const filler of fillers) {
-    assert.match(filler, /^\[neutral\] /);
-  }
+test('agent call client has no thinking filler playback helpers or call sites', () => {
+  assert.doesNotMatch(clientSource, /playStaticThinkingFillerAudio/);
+  assert.doesNotMatch(clientSource, /playThinkingFillerAudio/);
+  assert.doesNotMatch(clientSource, /startImmediateVerificationFiller/);
+  assert.doesNotMatch(clientSource, /startDelayedPostSpeechFiller/);
+  assert.doesNotMatch(clientSource, /delayedPostSpeechFiller/);
+  assert.doesNotMatch(clientSource, /immediateVerificationFiller/);
+  assert.doesNotMatch(clientSource, /thinkingFillerPlayback/);
+  assert.doesNotMatch(clientSource, /thinking-filler/);
+  assert.doesNotMatch(clientSource, /verification-filler/);
+  assert.doesNotMatch(clientSource, /post-speech-filler/);
 });
 
 test('agent call client reports voice timing milestones to the timing route without console logging', () => {
@@ -187,8 +95,8 @@ test('agent call client reports voice timing milestones to the timing route with
   assert.match(clientSource, /postVoiceTiming/);
   assert.match(clientSource, /event: 'transcript_ready'/);
   assert.match(clientSource, /event: 'agent_fetch_start'/);
-  assert.match(clientSource, /event: 'filler_playback_start'/);
-  assert.match(clientSource, /event: 'filler_playback_end'/);
+  assert.doesNotMatch(clientSource, /event: 'filler_playback_start'/);
+  assert.doesNotMatch(clientSource, /event: 'filler_playback_end'/);
   assert.match(clientSource, /event: 'agent_first_delta'/);
   assert.match(clientSource, /event: 'agent_first_speakable_chunk'/);
   assert.match(clientSource, /event: 'rumik_answer_text_sent'/);
@@ -201,15 +109,14 @@ test('agent call client reports voice timing milestones to the timing route with
 
 test('respond stream sends terminal turn policy from server route metadata', () => {
   assert.match(respondStreamSource, /event: 'policy'/);
-  assert.match(respondStreamSource, /suppressFiller/);
+  assert.doesNotMatch(respondStreamSource, /suppressFiller/);
   assert.match(respondStreamSource, /endCallAfterResponse/);
   assert.match(respondStreamSource, /conversation\.goodbye/);
-  assert.match(respondStreamSource, /verifiedMobileLast4/);
 });
 
-test('respond stream allows filler for verified normal turns and only suppresses terminal goodbye', () => {
-  assert.match(respondStreamSource, /suppressFiller: isTerminalGoodbye,/);
-  assert.doesNotMatch(respondStreamSource, /suppressFiller: isTerminalGoodbye \|\| !isReadAccessVerificationTurn/);
+test('respond stream no longer sends filler policy', () => {
+  assert.doesNotMatch(respondStreamSource, /suppressFiller/);
+  assert.match(respondStreamSource, /endCallAfterResponse: isTerminalGoodbye,/);
 });
 
 test('respond stream sends server agent timing milestones over SSE without console logging', () => {
@@ -297,77 +204,45 @@ test('agent call client keeps the call connected after rate-limit fallback audio
   assert.ok(returnIndex < errorIndex);
 });
 
-test('agent call client can start verification filler immediately before server policy arrives', () => {
+test('agent call client does not start filler before server policy arrives', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
   const fetchIndex = clientSource.indexOf("fetch('/api/agent/respond-stream'", askAgentIndex);
-  const immediateGateIndex = clientSource.indexOf('shouldUseImmediateVerificationFiller', fetchIndex);
-  const immediateStartIndex = clientSource.indexOf("startImmediateVerificationFiller('agent-request')", immediateGateIndex);
-  const policyFillerIndex = clientSource.indexOf('startThinkingFillerPlayback();', fetchIndex);
   const warmIndex = clientSource.indexOf('warmRumikSocket();', fetchIndex);
   const readStreamIndex = clientSource.indexOf('readAgentResponseStream(', fetchIndex);
   const policyCallbackIndex = clientSource.indexOf('(policy) => {', readStreamIndex);
-  const suppressGateIndex = clientSource.indexOf('if (policy.suppressFiller === false && !thinkingFillerStarted)', policyCallbackIndex);
   const policyGateIndex = clientSource.indexOf('const turnPolicy = createTurnPolicyGate', askAgentIndex);
 
   assert.notEqual(askAgentIndex, -1);
   assert.notEqual(fetchIndex, -1);
-  assert.notEqual(immediateGateIndex, -1);
-  assert.notEqual(immediateStartIndex, -1);
-  assert.notEqual(policyFillerIndex, -1);
   assert.notEqual(warmIndex, -1);
   assert.notEqual(readStreamIndex, -1);
   assert.notEqual(policyCallbackIndex, -1);
-  assert.notEqual(suppressGateIndex, -1);
   assert.equal(policyGateIndex, -1);
-  assert.ok(fetchIndex < immediateGateIndex);
-  assert.ok(immediateGateIndex < immediateStartIndex);
-  assert.ok(immediateStartIndex < warmIndex);
   assert.ok(readStreamIndex < policyCallbackIndex);
-  assert.ok(policyCallbackIndex < suppressGateIndex);
-  assert.ok(suppressGateIndex < policyFillerIndex);
   assert.ok(fetchIndex < warmIndex);
+  assert.doesNotMatch(clientSource.slice(fetchIndex, warmIndex), /Filler/);
+  assert.doesNotMatch(clientSource.slice(policyCallbackIndex, policyCallbackIndex + 240), /suppressFiller|startThinkingFillerPlayback/);
 });
 
-test('agent call client starts verification filler on speech stopped before transcript completion', () => {
+test('agent call client does not start filler on speech stopped before transcript completion', () => {
   const realtimeMessageIndex = clientSource.indexOf("dataChannel.addEventListener('message'");
   const speechStoppedIndex = clientSource.indexOf("realtimeEvent.type === 'input_audio_buffer.speech_stopped'", realtimeMessageIndex);
-  const delayedGateIndex = clientSource.indexOf('shouldUseDelayedPostSpeechFiller', speechStoppedIndex);
-  const delayedStartIndex = clientSource.indexOf("startDelayedPostSpeechFiller('server-vad-speech-stopped')", delayedGateIndex);
   const transcriptCompletedIndex = clientSource.indexOf('const utterance = getRealtimeTranscript(realtimeEvent);', speechStoppedIndex);
 
   assert.notEqual(realtimeMessageIndex, -1);
   assert.notEqual(speechStoppedIndex, -1);
-  assert.notEqual(delayedGateIndex, -1);
-  assert.notEqual(delayedStartIndex, -1);
   assert.notEqual(transcriptCompletedIndex, -1);
-  assert.ok(speechStoppedIndex < delayedStartIndex);
-  assert.ok(delayedStartIndex < transcriptCompletedIndex);
+  assert.doesNotMatch(clientSource.slice(speechStoppedIndex, transcriptCompletedIndex), /Filler|filler/);
 });
 
-test('agent call client delays post-speech fallback audio by 1000ms for verified and verification turns', () => {
-  const delayConstantIndex = clientSource.indexOf('const POST_SPEECH_FILLER_DELAY_MS = 1000;');
-  const delayedHelperIndex = clientSource.indexOf('function shouldUseDelayedPostSpeechFiller');
-  const verifiedGateIndex = clientSource.indexOf('if (input.callVerified) return true;', delayedHelperIndex);
-  const timerRefIndex = clientSource.indexOf('const delayedPostSpeechFillerTimerRef = useRef<number | null>(null);');
-  const startDelayedIndex = clientSource.indexOf('const startDelayedPostSpeechFiller = useCallback');
-  const timerIndex = clientSource.indexOf('window.setTimeout(() => {', startDelayedIndex);
-  const verificationStartIndex = clientSource.indexOf("startImmediateVerificationFiller('delayed-post-speech', 'verification')", timerIndex);
-  const mainStartIndex = clientSource.indexOf("startImmediateVerificationFiller('delayed-post-speech', 'main')", verificationStartIndex);
-  const delayUseIndex = clientSource.indexOf('POST_SPEECH_FILLER_DELAY_MS', timerIndex);
+test('agent call client has no delayed post-speech filler timer', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
-  const adoptIndex = clientSource.indexOf('delayedPostSpeechFillerRef.current', askAgentIndex);
 
-  assert.notEqual(delayConstantIndex, -1);
-  assert.notEqual(delayedHelperIndex, -1);
-  assert.notEqual(verifiedGateIndex, -1);
-  assert.notEqual(timerRefIndex, -1);
-  assert.notEqual(startDelayedIndex, -1);
-  assert.notEqual(timerIndex, -1);
-  assert.notEqual(verificationStartIndex, -1);
-  assert.notEqual(mainStartIndex, -1);
-  assert.notEqual(delayUseIndex, -1);
-  assert.notEqual(adoptIndex, -1);
-  assert.ok(timerIndex < delayUseIndex);
+  assert.notEqual(askAgentIndex, -1);
+  assert.doesNotMatch(clientSource, /POST_SPEECH_FILLER_DELAY_MS/);
+  assert.doesNotMatch(clientSource, /shouldUseDelayedPostSpeechFiller/);
+  assert.doesNotMatch(clientSource, /delayedPostSpeechFillerTimerRef/);
+  assert.doesNotMatch(clientSource, /delayedPostSpeechFillerRef/);
 });
 
 test('agent call client starts the agent stream before warming Rumik voice', () => {
@@ -383,84 +258,71 @@ test('agent call client starts the agent stream before warming Rumik voice', () 
 
 test('agent call client ends terminal goodbye turns after response playback finishes', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
-  const waitForBothIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, playbackQueue]);', askAgentIndex);
-  const waitForTurnIndex = clientSource.indexOf('await waitForRumikPlaybackTurn();', waitForBothIndex);
+  const waitForPlaybackIndex = clientSource.indexOf('await playbackQueue;', askAgentIndex);
+  const waitForTurnIndex = clientSource.indexOf('await waitForRumikPlaybackTurn();', waitForPlaybackIndex);
   const terminalEndIndex = clientSource.indexOf('if (data.endCallAfterResponse', waitForTurnIndex);
   const endCallIndex = clientSource.indexOf('endCall();', terminalEndIndex);
 
   assert.notEqual(askAgentIndex, -1);
-  assert.notEqual(waitForBothIndex, -1);
+  assert.notEqual(waitForPlaybackIndex, -1);
   assert.notEqual(waitForTurnIndex, -1);
   assert.notEqual(terminalEndIndex, -1);
   assert.notEqual(endCallIndex, -1);
-  assert.ok(waitForBothIndex < waitForTurnIndex);
+  assert.ok(waitForPlaybackIndex < waitForTurnIndex);
   assert.ok(waitForTurnIndex < terminalEndIndex);
   assert.ok(terminalEndIndex < endCallIndex);
 });
 
-test('agent call client queues answer audio without cutting the thinking filler mid-sentence', () => {
+test('agent call client queues answer audio without waiting for filler playback', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
-  const fillerIndex = clientSource.indexOf('thinkingFillerPlayback = playThinkingFillerAudio()', askAgentIndex);
-  const queueIndex = clientSource.indexOf('let playbackQueue = Promise.resolve();', fillerIndex);
+  const queueIndex = clientSource.indexOf('let playbackQueue = Promise.resolve();', askAgentIndex);
   const firstChunkIndex = clientSource.indexOf('if (!isFirstStreamChunk)', queueIndex);
   const queueAfterFillerIndex = clientSource.indexOf("playRumikText(chunk, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' })", firstChunkIndex);
-  const waitForBothIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, playbackQueue]);', queueAfterFillerIndex);
-  const firstChunkSource = clientSource.slice(firstChunkIndex, waitForBothIndex);
+  const waitForPlaybackIndex = clientSource.indexOf('await playbackQueue;', queueAfterFillerIndex);
+  const firstChunkSource = clientSource.slice(firstChunkIndex, waitForPlaybackIndex);
 
   assert.notEqual(askAgentIndex, -1);
-  assert.notEqual(fillerIndex, -1);
   assert.notEqual(queueIndex, -1);
   assert.notEqual(firstChunkIndex, -1);
   assert.notEqual(queueAfterFillerIndex, -1);
-  assert.notEqual(waitForBothIndex, -1);
-  assert.ok(fillerIndex < queueIndex);
+  assert.notEqual(waitForPlaybackIndex, -1);
   assert.ok(queueIndex < queueAfterFillerIndex);
-  assert.ok(queueAfterFillerIndex < waitForBothIndex);
+  assert.ok(queueAfterFillerIndex < waitForPlaybackIndex);
   assert.doesNotMatch(firstChunkSource, /cutActiveThinkingFiller/);
   assert.doesNotMatch(firstChunkSource, /resetPlayback: true/);
+  assert.doesNotMatch(clientSource.slice(askAgentIndex, waitForPlaybackIndex), /thinkingFillerPlayback/);
 });
 
-test('agent call client restores thinking state after static filler while agent response is pending', () => {
-  const staticFillerIndex = clientSource.indexOf('const playStaticThinkingFillerAudio = useCallback');
-  const cleanupIndex = clientSource.indexOf('const cleanup = (ok: boolean) => {', staticFillerIndex);
-  const restoreThinkingIndex = clientSource.indexOf("const nextState = respondingRef.current ? 'thinking' : 'connected';", cleanupIndex);
-  const setRefIndex = clientSource.indexOf('callStateRef.current = nextState;', restoreThinkingIndex);
-  const setStateIndex = clientSource.indexOf('setCallState(nextState);', setRefIndex);
+test('agent call client only has static state restoration for opening and rate-limit audio', () => {
   const openingIndex = clientSource.indexOf('const playStaticOpeningAudio = useCallback');
+  const rateLimitIndex = clientSource.indexOf('const playRateLimitFallbackAudio = useCallback');
 
-  assert.notEqual(staticFillerIndex, -1);
-  assert.notEqual(cleanupIndex, -1);
-  assert.notEqual(restoreThinkingIndex, -1);
-  assert.notEqual(setRefIndex, -1);
-  assert.notEqual(setStateIndex, -1);
   assert.notEqual(openingIndex, -1);
-  assert.ok(staticFillerIndex < cleanupIndex);
-  assert.ok(cleanupIndex < restoreThinkingIndex);
-  assert.ok(restoreThinkingIndex < setRefIndex);
-  assert.ok(setRefIndex < setStateIndex);
-  assert.ok(setStateIndex < openingIndex);
+  assert.notEqual(rateLimitIndex, -1);
+  assert.doesNotMatch(clientSource, /playStaticThinkingFillerAudio/);
 });
 
-test('agent call client queues fallback answers before waiting for the thinking filler to finish', () => {
+test('agent call client queues fallback answers without waiting for filler playback', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
   const fallbackIndex = clientSource.indexOf("fetch('/api/agent/respond'", askAgentIndex);
   const speakAnswerIndex = clientSource.indexOf("const answerPlayback = playRumikText(answer, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });", fallbackIndex);
-  const waitForBothIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, answerPlayback]);', speakAnswerIndex);
-  const waitForTurnIndex = clientSource.indexOf('await waitForRumikPlaybackTurn();', waitForBothIndex);
+  const waitForAnswerIndex = clientSource.indexOf('await answerPlayback;', speakAnswerIndex);
+  const waitForTurnIndex = clientSource.indexOf('await waitForRumikPlaybackTurn();', waitForAnswerIndex);
   const fallbackEndIndex = clientSource.indexOf('return;', waitForTurnIndex);
   const fallbackSource = clientSource.slice(fallbackIndex, fallbackEndIndex);
 
   assert.notEqual(askAgentIndex, -1);
   assert.notEqual(fallbackIndex, -1);
   assert.notEqual(speakAnswerIndex, -1);
-  assert.notEqual(waitForBothIndex, -1);
+  assert.notEqual(waitForAnswerIndex, -1);
   assert.notEqual(waitForTurnIndex, -1);
   assert.notEqual(fallbackEndIndex, -1);
-  assert.ok(speakAnswerIndex < waitForBothIndex);
-  assert.ok(waitForBothIndex < waitForTurnIndex);
+  assert.ok(speakAnswerIndex < waitForAnswerIndex);
+  assert.ok(waitForAnswerIndex < waitForTurnIndex);
   assert.doesNotMatch(fallbackSource, /cutActiveThinkingFiller/);
   assert.doesNotMatch(fallbackSource, /resetPlayback: true/);
   assert.doesNotMatch(fallbackSource, /await thinkingFillerPlayback;/);
+  assert.doesNotMatch(fallbackSource, /thinkingFillerPlayback/);
 });
 
 test('agent call client starts the opening playback without warming generated audio', () => {
@@ -745,7 +607,7 @@ test('agent call client can schedule Rumik packets without an extra safety pad',
 test('agent call client speaks final done-only answers from tool-backed responses', () => {
   const askAgentIndex = clientSource.indexOf('const askAgent = useCallback');
   const appendAgentIndex = clientSource.indexOf("appendTranscript('agent', answer);", askAgentIndex);
-  const awaitPlaybackIndex = clientSource.indexOf('await Promise.all([thinkingFillerPlayback, playbackQueue]);', appendAgentIndex);
+  const awaitPlaybackIndex = clientSource.indexOf('await playbackQueue;', appendAgentIndex);
   const doneAnswerSpeakIndex = clientSource.indexOf('if (!hasQueuedStreamAudio && answer)', askAgentIndex);
 
   assert.notEqual(askAgentIndex, -1);

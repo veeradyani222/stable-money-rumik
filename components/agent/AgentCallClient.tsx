@@ -6,7 +6,6 @@ import { useSearchParams } from 'next/navigation';
 import type { PersonaSuggestion, PersonaBrief } from '@/lib/agent/persona-suggestions';
 import { buildPersonaDetailSections } from '@/lib/agent/persona-panel';
 import { STABLE_DEFAULT_OPENING } from '@/lib/agent/stable-call-copy';
-import { routeStableTurn } from '@/lib/agent/stable-policy';
 import type { PersonaSeed } from '@/lib/personas';
 import { PERSONAS } from '@/lib/personas';
 import { PersonaDetailModal } from '@/components/onboarding/PersonaDetailModal';
@@ -54,7 +53,6 @@ interface AgentStreamResult {
   text: string;
   toolCalls: string[];
   verified?: boolean;
-  suppressFiller?: boolean;
   endCallAfterResponse?: boolean;
 }
 
@@ -99,7 +97,6 @@ interface PendingRumikTtsRequest {
 }
 
 interface AgentTurnPolicy {
-  suppressFiller?: boolean;
   endCallAfterResponse?: boolean;
 }
 
@@ -115,34 +112,12 @@ const ALWAYS_ON_VOICE_DEBUG_EVENTS = new Set([
   'agent:stream:chunk-before-rumik-normalize',
   'rumik:normalize:text',
 ]);
-const STABLE_THINKING_FILLERS = [
- '[neutral] Ek minute, main check karti hoon.',
-'[neutral] Okay, main abhi dekh kar batati hoon.',
-'[neutral] Ji, main dekh kar batati hoon.',
-'[neutral] Thoda wait kijiye, main system check karti hoon.',
-'[neutral] Bas ek moment, main details dekh leti hoon.',
-'[neutral] Main records check karke batati hoon.',
-] as const;
 const AGENT_CLIENT_HISTORY_LIMIT = 16;
 /** Ringtones: MP3 only, from `public/assets/` → `/assets/…` */
 const INCOMING_RINGTONE_SRC = '/assets/ringtone.mp3';
 const OUTGOING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
 const STATIC_RUMIK_OPENING_SRC = '/assets/audio/rumik-opening.wav';
 const STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC = '/assets/audio/rumik-429.wav';
-const STATIC_RUMIK_FILLER_SRCS = [
-  '/assets/audio/rumik-filler-2.wav',
-  '/assets/audio/rumik-filler-4.wav',
-  '/assets/audio/rumik-filler-5.wav',
-  '/assets/audio/rumik-filler-6.wav',
-] as const;
-const STATIC_RUMIK_MAIN_FILLER_SRCS = [
-  '/assets/audio/rumik-main-filler-1.wav',
-] as const;
-const STATIC_RUMIK_ALL_FILLER_SRCS = [
-  ...STATIC_RUMIK_FILLER_SRCS,
-  ...STATIC_RUMIK_MAIN_FILLER_SRCS,
-] as const;
-type ThinkingFillerKind = 'main' | 'verification';
 const STATIC_OPENING_ECHO_CALIBRATION_MS = 900;
 const STATIC_OPENING_BARGE_IN_SAMPLE_MS = 60;
 const STATIC_OPENING_BARGE_IN_REQUIRED_FRAMES = 2;
@@ -151,7 +126,6 @@ const STATIC_OPENING_ECHO_DELTA_RMS = 0.022;
 const STATIC_OPENING_ECHO_MULTIPLIER = 2.4;
 const NEAR_SIMULTANEOUS_UTTERANCE_WINDOW_MS = 1200;
 const DUPLICATE_UTTERANCE_WINDOW_MS = 3000;
-const POST_SPEECH_FILLER_DELAY_MS = 1000;
 const SHORT_REALTIME_REPLY_PATTERN =
   /(?:^|\s)(?:yes|yeah|yep|haan|han|ha|ji|ok|okay|no|nah|nahi|na|theek)(?:\s|$)|हाँ|हां|नहीं|ठीक|جی|ہاں|نہیں|ٹھیک|হ্যাঁ|না|ঠিক|ਹਾਂ|ਨਹੀਂ|ਠੀਕ/iu;
 const SHORT_REALTIME_COMMAND_PATTERN =
@@ -161,11 +135,6 @@ const FD_TOPIC_PATTERN =
 const PAYMENT_TOPIC_PATTERN =
   /payment|pay|paisa|paise|refund|पेमेंट|भुगतान|पैसा|रिफंड|پیمنٹ|ادائیگی|پیسہ|پیسے|ریفنڈ|পেমেন্ট|টাকা|রিফান্ড|ਪੇਮੈਂਟ|ਪੈਸਾ|ਰਿਫੰਡ|பணம்|ಹಣ|డబ్బు|പണം/iu;
 const KYC_TOPIC_PATTERN = /kyc|केवाईसी|के\s*वाई\s*सी|کے\s*وائی\s*سی|কেওয়াইসি|ਕੇ\s*ਵਾਈ\s*ਸੀ/iu;
-const MOBILE_VERIFICATION_PROMPT_PATTERN =
-  /(?:mobile|मोबाइल|موبائل|ਮੋਬਾਈਲ).{0,80}(?:last\s*(?:4|four)|digits?|चार|چار|ਚਾਰ)|(?:last\s*(?:4|four)).{0,80}(?:mobile|digits?)/iu;
-const DOB_VERIFICATION_PROMPT_PATTERN =
-  /date\s+of\s+birth|dob|janm|जन्म|तारीख\s+जन्म|تاریخ\s+پیدائش|ਜਨਮ/iu;
-
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -400,38 +369,6 @@ function shouldAcceptRealtimeTranscript(input: {
   return false;
 }
 
-function isVerificationPromptText(text: string): boolean {
-  return MOBILE_VERIFICATION_PROMPT_PATTERN.test(text) || DOB_VERIFICATION_PROMPT_PATTERN.test(text);
-}
-
-function hasActiveVerificationPrompt(history: HistoryMessage[]): boolean {
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const message = history[index];
-    if (message.role === 'model') return isVerificationPromptText(message.text);
-  }
-  return false;
-}
-
-function shouldUseImmediateVerificationFiller(input: {
-  utterance?: string;
-  history: HistoryMessage[];
-  callVerified: boolean;
-}): boolean {
-  if (input.callVerified) return false;
-  if (hasActiveVerificationPrompt(input.history)) return true;
-  if (!input.utterance) return false;
-  const route = routeStableTurn(input.utterance, input.history);
-  return route.intent !== 'conversation.goodbye' && route.tools.includes('verify_read_access');
-}
-
-function shouldUseDelayedPostSpeechFiller(input: {
-  history: HistoryMessage[];
-  callVerified: boolean;
-}): boolean {
-  if (input.callVerified) return true;
-  return shouldUseImmediateVerificationFiller(input);
-}
-
 function normalizeRealtimeEchoText(text: string): string {
   return text
     .replace(/\[[^\]]+\]/g, ' ')
@@ -536,7 +473,6 @@ async function readAgentResponseStream(
       }
       if (message.event === 'policy') {
         const policy = {
-          suppressFiller: typeof message.data.suppressFiller === 'boolean' ? message.data.suppressFiller : undefined,
           endCallAfterResponse:
             typeof message.data.endCallAfterResponse === 'boolean' ? message.data.endCallAfterResponse : undefined,
         };
@@ -566,7 +502,6 @@ async function readAgentResponseStream(
           text: typeof message.data.text === 'string' ? message.data.text : result.text,
           toolCalls: Array.isArray(message.data.toolCalls) ? message.data.toolCalls.map(String) : [],
           verified: typeof message.data.verified === 'boolean' ? message.data.verified : result.verified,
-          suppressFiller: result.suppressFiller,
           endCallAfterResponse: result.endCallAfterResponse,
         };
       }
@@ -582,9 +517,9 @@ async function readAgentResponseStream(
   return result;
 }
 
-function prefetchStaticThinkingFillerAudio() {
+function prefetchStaticAudio() {
   if (typeof Audio === 'undefined') return;
-  [...STATIC_RUMIK_ALL_FILLER_SRCS, STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC].forEach((src) => {
+  [STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC].forEach((src) => {
     const audio = new Audio(src);
     audio.preload = 'auto';
     audio.load();
@@ -602,10 +537,6 @@ function shouldPauseRealtimeMicrophoneTrack(input: { muted: boolean; callState: 
 
 function isInactiveCallState(callState: CallState): boolean {
   return callState !== 'connected' && callState !== 'thinking' && callState !== 'speaking';
-}
-
-function stripTranscriptToneTag(value: string): string {
-  return value.replace(/^\[[^\]]+\]\s*/, '').trim();
 }
 
 const AGENT_SIDEBAR_WIDTH_STORAGE_KEY = 'stable-agent-sidebar-width-px';
@@ -692,11 +623,6 @@ export function AgentCallClient() {
   const sourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const historyRef = useRef<HistoryMessage[]>([]);
   const callVerifiedRef = useRef(false);
-  const immediateVerificationFillerRef = useRef<Promise<void> | null>(null);
-  const delayedPostSpeechFillerRef = useRef<Promise<void> | null>(null);
-  const delayedPostSpeechFillerTimerRef = useRef<number | null>(null);
-  const delayedPostSpeechFillerResolveRef = useRef<(() => void) | null>(null);
-  const delayedPostSpeechFillerKindRef = useRef<ThinkingFillerKind>('verification');
   const callIdRef = useRef('');
   const respondingRef = useRef(false);
   const pendingInterruptRef = useRef('');
@@ -777,7 +703,7 @@ export function AgentCallClient() {
   }, [transcript]);
 
   useEffect(() => {
-    prefetchStaticThinkingFillerAudio();
+    prefetchStaticAudio();
   }, []);
 
   useEffect(() => {
@@ -1382,84 +1308,6 @@ export function AgentCallClient() {
     [clearPendingRumikTtsRequest, ensureRumikSocket, finishRumikPlaybackTurn, stopRumikAudio, waitForRumikPlaybackTurn],
   );
 
-  const playStaticThinkingFillerAudio = useCallback(
-    async (index: number, fillerKind: ThinkingFillerKind): Promise<boolean> => {
-      if (typeof Audio === 'undefined' || isInactiveCallState(callStateRef.current)) return false;
-
-      const src = STATIC_RUMIK_ALL_FILLER_SRCS[index];
-      if (!src) return false;
-
-      stopRumikAudio();
-      const playbackId = rumikPlaybackIdRef.current;
-      const audio = new Audio(src);
-      audio.preload = 'auto';
-      audio.setAttribute('playsInline', '');
-
-      setIsListening(false);
-      callStateRef.current = 'speaking';
-      setCallState('speaking');
-      rumikSpeakingRef.current = true;
-
-      logVoiceDebug('rumik:thinking-filler-static:play', { src, index, fillerKind });
-
-      const played = await new Promise<boolean>((resolve) => {
-        const cleanup = (ok: boolean) => {
-          rumikSpeakingRef.current = false;
-          if (playbackId === rumikPlaybackIdRef.current && !isInactiveCallState(callStateRef.current)) {
-            const nextState = respondingRef.current ? 'thinking' : 'connected';
-            callStateRef.current = nextState;
-            setCallState(nextState);
-          }
-          resolve(ok);
-        };
-
-        audio.onended = () => cleanup(true);
-        audio.onerror = () => cleanup(false);
-        audio.play().catch((playError) => {
-          logVoiceDebug('rumik:thinking-filler-static:play-failed', {
-            src,
-            index,
-            fillerKind,
-            message: playError instanceof Error ? playError.message : 'unknown',
-          });
-          cleanup(false);
-        });
-      });
-
-      if (!played) logVoiceDebug('rumik:thinking-filler-static:error', { src, index, fillerKind });
-      return played;
-    },
-    [stopRumikAudio],
-  );
-
-  const playThinkingFillerAudio = useCallback(async (fillerKind: ThinkingFillerKind = 'main') => {
-    const timingTurn = activeVoiceTimingTurnRef.current;
-    if (timingTurn) {
-      postVoiceTiming({
-        callId: callIdRef.current,
-        turn: timingTurn,
-        event: 'filler_playback_start',
-      });
-    }
-    const selectedIndex = Math.floor(Math.random() * STATIC_RUMIK_ALL_FILLER_SRCS.length);
-    const text = STABLE_THINKING_FILLERS[selectedIndex % STABLE_THINKING_FILLERS.length];
-
-    try {
-      if (await playStaticThinkingFillerAudio(selectedIndex, fillerKind)) return;
-      const transcriptText = stripTranscriptToneTag(text);
-      appendTranscript('agent', transcriptText);
-      await playRumikText(text, { trimLeadingSilence: false });
-    } finally {
-      if (timingTurn) {
-        postVoiceTiming({
-          callId: callIdRef.current,
-          turn: timingTurn,
-          event: 'filler_playback_end',
-        });
-      }
-    }
-  }, [appendTranscript, playRumikText, playStaticThinkingFillerAudio]);
-
   const playRateLimitFallbackAudio = useCallback(async () => {
     if (typeof Audio === 'undefined' || isInactiveCallState(callStateRef.current)) return false;
 
@@ -1501,80 +1349,6 @@ export function AgentCallClient() {
     if (!played) logVoiceDebug('agent:rate-limit-fallback:error', { src: STATIC_RUMIK_RATE_LIMIT_FALLBACK_SRC });
     return played;
   }, [stopRumikAudio]);
-
-  const startImmediateVerificationFiller = useCallback(
-    (reason: string, fillerKind: ThinkingFillerKind = 'verification'): Promise<void> | null => {
-      if (immediateVerificationFillerRef.current) return immediateVerificationFillerRef.current;
-      if ((fillerKind === 'verification' && callVerifiedRef.current) || isInactiveCallState(callStateRef.current)) return null;
-
-      logVoiceDebug('agent:verification-filler:immediate-start', { reason, fillerKind });
-      const playback = (fillerKind === 'verification' ? playThinkingFillerAudio('verification') : playThinkingFillerAudio('main'))
-        .catch((fillerError) => {
-          logVoiceDebug('agent:verification-filler:immediate-error', {
-            reason,
-            fillerKind,
-            message: fillerError instanceof Error ? fillerError.message : 'Thinking filler playback failed',
-          });
-        });
-      immediateVerificationFillerRef.current = playback;
-      void playback.finally(() => {
-        if (immediateVerificationFillerRef.current === playback) {
-          immediateVerificationFillerRef.current = null;
-        }
-      });
-      return playback;
-    },
-    [playThinkingFillerAudio],
-  );
-
-  const cancelDelayedPostSpeechFiller = useCallback(() => {
-    if (delayedPostSpeechFillerTimerRef.current !== null) {
-      window.clearTimeout(delayedPostSpeechFillerTimerRef.current);
-      delayedPostSpeechFillerTimerRef.current = null;
-    }
-    delayedPostSpeechFillerResolveRef.current?.();
-    delayedPostSpeechFillerResolveRef.current = null;
-    delayedPostSpeechFillerRef.current = null;
-  }, []);
-
-  const startDelayedPostSpeechFiller = useCallback(
-    (reason: string, fillerKind: ThinkingFillerKind = callVerifiedRef.current ? 'main' : 'verification'): Promise<void> | null => {
-      if (delayedPostSpeechFillerRef.current) return delayedPostSpeechFillerRef.current;
-      if (isInactiveCallState(callStateRef.current)) return null;
-
-      delayedPostSpeechFillerKindRef.current = fillerKind;
-      logVoiceDebug('agent:post-speech-filler:delayed-scheduled', {
-        reason,
-        fillerKind,
-        delayMs: POST_SPEECH_FILLER_DELAY_MS,
-      });
-      const playback = new Promise<void>((resolve) => {
-        delayedPostSpeechFillerResolveRef.current = resolve;
-        delayedPostSpeechFillerTimerRef.current = window.setTimeout(() => {
-          delayedPostSpeechFillerTimerRef.current = null;
-          delayedPostSpeechFillerResolveRef.current = null;
-          const kind = delayedPostSpeechFillerKindRef.current;
-          const started =
-            kind === 'verification'
-              ? startImmediateVerificationFiller('delayed-post-speech', 'verification')
-              : startImmediateVerificationFiller('delayed-post-speech', 'main');
-          if (!started) {
-            resolve();
-            return;
-          }
-          void started.finally(resolve);
-        }, POST_SPEECH_FILLER_DELAY_MS);
-      }).finally(() => {
-        if (delayedPostSpeechFillerRef.current === playback) {
-          delayedPostSpeechFillerRef.current = null;
-        }
-        delayedPostSpeechFillerResolveRef.current = null;
-      });
-      delayedPostSpeechFillerRef.current = playback;
-      return playback;
-    },
-    [startImmediateVerificationFiller],
-  );
 
   const playStaticOpeningAudio = useCallback(async (): Promise<boolean> => {
     if (typeof Audio === 'undefined' || isInactiveCallState(callStateRef.current)) return false;
@@ -1731,8 +1505,6 @@ export function AgentCallClient() {
     closeRumikSocket();
     callVerifiedRef.current = false;
     rumikAnswerStreamActiveRef.current = false;
-    immediateVerificationFillerRef.current = null;
-    cancelDelayedPostSpeechFiller();
     callIdRef.current = '';
     pendingInterruptRef.current = '';
     callStateRef.current = 'idle';
@@ -1740,7 +1512,7 @@ export function AgentCallClient() {
     setDuration(0);
     setInterimText('');
     setVerificationStatus('none');
-  }, [cancelDelayedPostSpeechFiller, closeRumikSocket]);
+  }, [closeRumikSocket]);
 
   const askAgent = useCallback(
     async (utteranceText: string) => {
@@ -1781,22 +1553,6 @@ export function AgentCallClient() {
       }
       recentSubmittedUtteranceRef.current = duplicateSubmission.marker;
       respondingRef.current = true;
-      if (delayedPostSpeechFillerRef.current) {
-        const route = routeStableTurn(text, historyRef.current);
-        if (route.intent === 'conversation.goodbye') {
-          cancelDelayedPostSpeechFiller();
-        } else if (callVerifiedRef.current) {
-          delayedPostSpeechFillerKindRef.current = 'main';
-        } else if (
-          shouldUseImmediateVerificationFiller({
-            utterance: text,
-            history: historyRef.current,
-            callVerified: callVerifiedRef.current,
-          })
-        ) {
-          delayedPostSpeechFillerKindRef.current = 'verification';
-        }
-      }
       setCallState('thinking');
       setInterimText('');
       appendTranscript('user', text);
@@ -1824,18 +1580,6 @@ export function AgentCallClient() {
         turn: timingTurn,
         event: 'agent_fetch_start',
       });
-      let thinkingFillerStarted =
-        immediateVerificationFillerRef.current !== null || delayedPostSpeechFillerRef.current !== null;
-      let thinkingFillerPlayback =
-        immediateVerificationFillerRef.current ?? delayedPostSpeechFillerRef.current ?? Promise.resolve();
-      const startThinkingFillerPlayback = () => {
-        thinkingFillerStarted = true;
-        thinkingFillerPlayback = playThinkingFillerAudio().catch((fillerError) => {
-          logVoiceDebug('agent:thinking-filler:error', {
-            message: fillerError instanceof Error ? fillerError.message : 'Thinking filler playback failed',
-          });
-        });
-      };
       const streamResponsePromise = fetch('/api/agent/respond-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1847,20 +1591,6 @@ export function AgentCallClient() {
           history: historyRef.current,
         }),
       });
-      if (
-        !thinkingFillerStarted &&
-        shouldUseImmediateVerificationFiller({
-          utterance: text,
-          history: historyRef.current,
-          callVerified: callVerifiedRef.current,
-        })
-      ) {
-        const immediatePlayback = startImmediateVerificationFiller('agent-request');
-        if (immediatePlayback) {
-          thinkingFillerStarted = true;
-          thinkingFillerPlayback = immediatePlayback;
-        }
-      }
       warmRumikSocket();
       let hasQueuedStreamAudio = false;
       rumikAnswerStreamActiveRef.current = true;
@@ -1881,9 +1611,6 @@ export function AgentCallClient() {
         let streamedText = '';
 
         const queueRumikChunk = (chunk: string) => {
-          if (delayedPostSpeechFillerTimerRef.current !== null) {
-            cancelDelayedPostSpeechFiller();
-          }
           const isFirstStreamChunk = queuedChunks === 0;
           queuedChunks += 1;
           hasQueuedStreamAudio = true;
@@ -1931,9 +1658,7 @@ export function AgentCallClient() {
             pushRumikTextDelta(chunkBuffer, delta).forEach(queueRumikChunk);
           },
           (policy) => {
-            if (policy.suppressFiller === false && !thinkingFillerStarted) {
-              startThinkingFillerPlayback();
-            }
+            void policy;
           },
           (timing) => {
             postVoiceTiming({
@@ -2000,7 +1725,7 @@ export function AgentCallClient() {
         ];
         historyRef.current = nextHistory.slice(-AGENT_CLIENT_HISTORY_LIMIT);
         appendTranscript('agent', answer);
-        await Promise.all([thinkingFillerPlayback, playbackQueue]);
+        await playbackQueue;
         rumikAnswerStreamActiveRef.current = false;
         finishRumikPlaybackTurn();
         await waitForRumikPlaybackTurn();
@@ -2052,11 +1777,8 @@ export function AgentCallClient() {
             ];
             historyRef.current = fallbackHistory.slice(-AGENT_CLIENT_HISTORY_LIMIT);
             appendTranscript('agent', answer);
-            if (delayedPostSpeechFillerTimerRef.current !== null) {
-              cancelDelayedPostSpeechFiller();
-            }
             const answerPlayback = playRumikText(answer, { resetPlayback: false, waitForCompletion: false, timingLabel: 'answer' });
-            await Promise.all([thinkingFillerPlayback, answerPlayback]);
+            await answerPlayback;
             await waitForRumikPlaybackTurn();
             return;
           } catch (fallbackError) {
@@ -2094,13 +1816,10 @@ export function AgentCallClient() {
     },
     [
       appendTranscript,
-      cancelDelayedPostSpeechFiller,
       endCall,
       playRumikText,
       playRateLimitFallbackAudio,
-      playThinkingFillerAudio,
       session,
-      startImmediateVerificationFiller,
       stopRumikAudio,
       waitForRumikPlaybackTurn,
       warmRumikSocket,
@@ -2228,14 +1947,6 @@ export function AgentCallClient() {
           }
           if (realtimeEvent.type === 'input_audio_buffer.speech_stopped') {
             setUserVoiceVisual(false);
-            if (
-              shouldUseDelayedPostSpeechFiller({
-                history: historyRef.current,
-                callVerified: callVerifiedRef.current,
-              })
-            ) {
-              startDelayedPostSpeechFiller('server-vad-speech-stopped');
-            }
             return;
           }
           if (realtimeEvent.type === 'conversation.item.input_audio_transcription.delta') {
@@ -2257,23 +1968,11 @@ export function AgentCallClient() {
           setUserVoiceVisual(false);
           setInterimText('');
           if (utterance.length >= 2) {
-            const route = routeStableTurn(utterance, historyRef.current);
-            const prestartedVerificationFillerActive =
-              (immediateVerificationFillerRef.current !== null || delayedPostSpeechFillerRef.current !== null) &&
-              (callVerifiedRef.current
-                ? route.intent !== 'conversation.goodbye'
-                : shouldUseImmediateVerificationFiller({
-                    utterance,
-                    history: historyRef.current,
-                    callVerified: callVerifiedRef.current,
-                  }));
-            const acceptingCallState =
-              prestartedVerificationFillerActive ? 'connected' : callStateRef.current;
             if (
               !shouldAcceptRealtimeTranscript({
                 utterance,
                 responding: respondingRef.current,
-                callState: acceptingCallState,
+                callState: callStateRef.current,
               })
             ) {
               return;
@@ -2287,7 +1986,7 @@ export function AgentCallClient() {
             if (
               respondingRef.current ||
               callStateRef.current === 'thinking' ||
-              (callStateRef.current === 'speaking' && !prestartedVerificationFillerActive)
+              callStateRef.current === 'speaking'
             ) {
               performRealtimeBargeIn('realtime-transcript-completed');
             }
@@ -2341,7 +2040,7 @@ export function AgentCallClient() {
       });
       logVoiceDebug('realtime:peer:connected');
     },
-    [askAgent, performRealtimeBargeIn, sessionId, startDelayedPostSpeechFiller],
+    [askAgent, performRealtimeBargeIn, sessionId],
   );
 
   const startCall = useCallback(async () => {
@@ -2366,7 +2065,6 @@ export function AgentCallClient() {
     historyRef.current = [];
     callVerifiedRef.current = false;
     rumikAnswerStreamActiveRef.current = false;
-    immediateVerificationFillerRef.current = null;
     callIdRef.current =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
@@ -2593,14 +2291,6 @@ export function AgentCallClient() {
         if (silentFor >= silenceCutoffMs && spokenFor >= minSpeechMs) {
           isCapturingUtteranceRef.current = false;
           logVoiceDebug('vad:speech-end', { silentFor, spokenFor, chunks: chunkPartsRef.current.length });
-          if (
-            shouldUseImmediateVerificationFiller({
-              history: historyRef.current,
-              callVerified: callVerifiedRef.current,
-            })
-          ) {
-            startImmediateVerificationFiller('local-vad-speech-end');
-          }
           flushAfterRecorderStopRef.current = true;
           const currentRecorder = mediaRecorderRef.current;
           if (currentRecorder?.state === 'recording') {
@@ -2641,7 +2331,6 @@ export function AgentCallClient() {
     playOpeningAudio,
     session,
     sessionId,
-    startImmediateVerificationFiller,
     stopRumikAudio,
     syncMicrophoneRecorder,
     syncRealtimeMicrophoneTrack,

@@ -8,7 +8,6 @@ import {
 } from '@/lib/agent/openai-agent';
 import { createSupportTicketForSession } from '@/lib/agent/support-tickets';
 import { sendSecureLinkForSession } from '@/lib/agent/secure-links';
-import type { StableIntentRoute } from '@/lib/agent/stable-policy';
 import { getPool } from '@/lib/db';
 import { buildPersonaFromDemoUserRow } from '@/lib/demo-users';
 import {
@@ -22,14 +21,11 @@ import {
 import { createSseWriter } from './sse';
 
 function getTurnPolicyFromRoute(input: {
-  route: StableIntentRoute;
-  callVerified: boolean;
-  verifiedMobileLast4: string | null;
+  route: { intent: string };
 }) {
   const { route } = input;
   const isTerminalGoodbye = route.intent === 'conversation.goodbye';
   return {
-    suppressFiller: isTerminalGoodbye,
     endCallAfterResponse: isTerminalGoodbye,
   };
 }
@@ -128,8 +124,6 @@ export async function POST(request: Request) {
                   event: 'policy',
                   data: getTurnPolicyFromRoute({
                     route: debugEvent.route,
-                    callVerified,
-                    verifiedMobileLast4,
                   }),
                 };
                 writer.send(turnPolicy.event, turnPolicy.data);
