@@ -1,14 +1,12 @@
 ﻿'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 import type { PersonaSuggestion, PersonaBrief } from '@/lib/agent/persona-suggestions';
 import { buildPersonaDetailSections } from '@/lib/agent/persona-panel';
 import { STABLE_DEFAULT_OPENING } from '@/lib/agent/stable-call-copy';
 import type { PersonaSeed } from '@/lib/personas';
-import { PERSONAS } from '@/lib/personas';
-import { PersonaDetailModal } from '@/components/onboarding/PersonaDetailModal';
 import { AgentAudioVisualizerBar, type AgentVisualizerSpeaker } from '@/components/agents-ui/agent-audio-visualizer-bar';
 import {
   shouldSendMicrophoneAudio,
@@ -20,7 +18,6 @@ import { createRumikChunkBuffer, flushRumikChunkBuffer, pushRumikTextDelta } fro
 import { extractRumikStartingTone, normalizeRumikText, type RumikTone } from '@/lib/voice/rumik-text';
 
 type CallState = VoiceCallState;
-type PanelTab = 'persona' | 'questions' | 'changePersona';
 type HistoryMessage = { role: 'user' | 'model'; text: string };
 type TranscriptLine = { role: 'user' | 'agent' | 'system'; text: string };
 
@@ -145,22 +142,6 @@ function BackIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M15 18 9 12l6-6" />
-    </svg>
-  );
-}
-
-function ChevronLeftIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M15 18 9 12l6-6" />
-    </svg>
-  );
-}
-
-function ChevronRightIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M9 18l6-6-6-6" />
     </svg>
   );
 }
@@ -539,34 +520,14 @@ function isInactiveCallState(callState: CallState): boolean {
   return callState !== 'connected' && callState !== 'thinking' && callState !== 'speaking';
 }
 
-const AGENT_SIDEBAR_WIDTH_STORAGE_KEY = 'stable-agent-sidebar-width-px';
-const AGENT_SIDEBAR_WIDTH_MIN = 280;
-const AGENT_SIDEBAR_WIDTH_MAX = 560;
-const AGENT_SIDEBAR_WIDTH_DEFAULT = 380;
-
-function clampAgentSidebarWidthPx(value: number): number {
-  return Math.min(AGENT_SIDEBAR_WIDTH_MAX, Math.max(AGENT_SIDEBAR_WIDTH_MIN, Math.round(value)));
-}
-
-function readStoredAgentSidebarWidthPx(): number {
-  if (typeof window === 'undefined') return AGENT_SIDEBAR_WIDTH_DEFAULT;
-  try {
-    const raw = window.localStorage.getItem(AGENT_SIDEBAR_WIDTH_STORAGE_KEY);
-    const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-    if (!Number.isFinite(parsed)) return AGENT_SIDEBAR_WIDTH_DEFAULT;
-    return clampAgentSidebarWidthPx(parsed);
-  } catch {
-    return AGENT_SIDEBAR_WIDTH_DEFAULT;
-  }
-}
-
 export function AgentCallClient() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const sessionId = searchParams.get('session_id') ?? '';
 
   const [session, setSession] = useState<AgentSessionPayload | null>(null);
   const [sessionError, setSessionError] = useState('');
-  const [activeTab, setActiveTab] = useState<PanelTab>('persona');
+  const [hasEnteredCall, setHasEnteredCall] = useState(false);
   const [callState, setCallState] = useState<CallState>('idle');
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState('');
@@ -577,14 +538,7 @@ export function AgentCallClient() {
   const [playOutboundTone, setPlayOutboundTone] = useState(false);
   const [userVoiceVisual, setUserVoiceVisual] = useState(false);
   const [voiceAnalyser, setVoiceAnalyser] = useState<AnalyserNode | null>(null);
-  const [agentSidebarWidthPx, setAgentSidebarWidthPx] = useState(AGENT_SIDEBAR_WIDTH_DEFAULT);
-  const [isPersonaPanelOpen, setIsPersonaPanelOpen] = useState(false);
-  const [personaChangeError, setPersonaChangeError] = useState('');
-  const [personaChangeSubmittingId, setPersonaChangeSubmittingId] = useState<string | null>(null);
-  const [detailPersona, setDetailPersona] = useState<PersonaSeed | null>(null);
   const [verificationStatus, setVerificationStatus] = useState<VerificationStatus>('none');
-  const agentSidebarResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
-  const transcriptStripRef = useRef<HTMLDivElement>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -698,97 +652,8 @@ export function AgentCallClient() {
   }, [callState]);
 
   useEffect(() => {
-    const el = transcriptStripRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [transcript]);
-
-  useEffect(() => {
     prefetchStaticAudio();
   }, []);
-
-  useEffect(() => {
-    setAgentSidebarWidthPx(readStoredAgentSidebarWidthPx());
-  }, []);
-
-  const persistAgentSidebarWidthPx = useCallback((width: number) => {
-    try {
-      window.localStorage.setItem(AGENT_SIDEBAR_WIDTH_STORAGE_KEY, String(width));
-    } catch {
-      // ignore quota / private mode
-    }
-  }, []);
-
-  const onAgentSidebarResizePointerDown = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      agentSidebarResizeRef.current = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startWidth: agentSidebarWidthPx,
-      };
-      event.currentTarget.setPointerCapture(event.pointerId);
-    },
-    [agentSidebarWidthPx],
-  );
-
-  const onAgentSidebarResizePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const drag = agentSidebarResizeRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const delta = drag.startX - event.clientX;
-    setAgentSidebarWidthPx(clampAgentSidebarWidthPx(drag.startWidth + delta));
-  }, []);
-
-  const endAgentSidebarResize = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const drag = agentSidebarResizeRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      agentSidebarResizeRef.current = null;
-      try {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      } catch {
-        // already released
-      }
-      setAgentSidebarWidthPx((width) => {
-        persistAgentSidebarWidthPx(width);
-        return width;
-      });
-    },
-    [persistAgentSidebarWidthPx],
-  );
-
-  const onAgentSidebarResizeKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        setAgentSidebarWidthPx((w) => {
-          const next = clampAgentSidebarWidthPx(w + 12);
-          persistAgentSidebarWidthPx(next);
-          return next;
-        });
-      } else if (event.key === 'ArrowRight') {
-        event.preventDefault();
-        setAgentSidebarWidthPx((w) => {
-          const next = clampAgentSidebarWidthPx(w - 12);
-          persistAgentSidebarWidthPx(next);
-          return next;
-        });
-      } else if (event.key === 'Home') {
-        event.preventDefault();
-        setAgentSidebarWidthPx(() => {
-          persistAgentSidebarWidthPx(AGENT_SIDEBAR_WIDTH_MAX);
-          return AGENT_SIDEBAR_WIDTH_MAX;
-        });
-      } else if (event.key === 'End') {
-        event.preventDefault();
-        setAgentSidebarWidthPx(() => {
-          persistAgentSidebarWidthPx(AGENT_SIDEBAR_WIDTH_MIN);
-          return AGENT_SIDEBAR_WIDTH_MIN;
-        });
-      }
-    },
-    [persistAgentSidebarWidthPx],
-  );
 
   useEffect(() => {
     let cancelled = false;
@@ -807,7 +672,7 @@ export function AgentCallClient() {
         if (!cancelled) {
           setSession(data);
           setDuration(0);
-          setCallState('incoming');
+          setCallState('idle');
         }
       })
       .catch((loadError) => {
@@ -1826,39 +1691,6 @@ export function AgentCallClient() {
     ],
   );
 
-  const changePersona = useCallback(
-    async (personaId: string) => {
-      if (!session || personaChangeSubmittingId) return;
-
-      setPersonaChangeError('');
-      setPersonaChangeSubmittingId(personaId);
-      try {
-        const response = await fetch('/api/onboarding/select-persona', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: session.session_id, persona_id: personaId }),
-        });
-        const data: unknown = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          const message =
-            typeof data === 'object' && data && 'error' in data && typeof (data as { error: unknown }).error === 'string'
-              ? (data as { error: string }).error
-              : 'Could not change persona.';
-          setPersonaChangeError(message);
-          return;
-        }
-
-        endCall();
-        window.location.assign(`/agent?session_id=${encodeURIComponent(session.session_id)}`);
-      } catch {
-        setPersonaChangeError('Network error. Check your connection and try again.');
-      } finally {
-        setPersonaChangeSubmittingId(null);
-      }
-    },
-    [endCall, personaChangeSubmittingId, session],
-  );
-
   useEffect(() => () => endCall(), [endCall]);
 
   const declineIncoming = useCallback(() => {
@@ -2336,6 +2168,28 @@ export function AgentCallClient() {
     syncRealtimeMicrophoneTrack,
   ]);
 
+  const enterCall = useCallback(async () => {
+    setHasEnteredCall(true);
+    await startCall();
+  }, [startCall]);
+
+  const handleBack = useCallback(() => {
+    if (hasEnteredCall) {
+      endCall();
+      setHasEnteredCall(false);
+      return;
+    }
+
+    if (typeof window !== 'undefined') {
+      if (window.history.length > 1) {
+        window.history.back();
+        return;
+      }
+    }
+
+    router.push('/onboarding');
+  }, [endCall, hasEnteredCall, router]);
+
   const visualizerSpeaker = useMemo<AgentVisualizerSpeaker>(() => {
     if (callState === 'speaking') return 'agent';
     if (callState === 'connected' && (isListening || userVoiceVisual)) return 'user';
@@ -2361,14 +2215,100 @@ export function AgentCallClient() {
     );
   }
 
+  if (!hasEnteredCall) {
+    return (
+      <main className="agent-page agent-page--precall">
+        <section className="agent-precall" aria-label="Stable Money Support introduction">
+          <header className="agent-precall__header">
+            <button type="button" className="agent-icon-btn" onClick={handleBack} aria-label="Go back">
+              <BackIcon />
+            </button>
+            <p className="agent-precall__eyebrow" style={{ margin: 0 }}>Stable Money Support</p>
+          </header>
+
+          <div className="agent-precall__hero">
+            <div className="agent-precall__intro">
+              <p className="agent-precall__kicker">Account support assistant</p>
+              <h2>Talk through fixed deposits, payments, KYC, and account.</h2>
+              <p>
+                Review the active demo customer below, then start a focused support call with the same voice flow and
+                verification behavior.
+              </p>
+              <button type="button" className="agent-precall__call" onClick={() => void enterCall()}>
+                Call Stable Money Support
+              </button>
+            </div>
+
+            <div className="agent-precall__capabilities" aria-label="Support capabilities">
+              <article>
+                <span>FD</span>
+                <h3>Fixed deposits</h3>
+                <p>Status, bookings, maturity, interest, and next steps.</p>
+              </article>
+              <article>
+                <span>PAY</span>
+                <h3>Payments</h3>
+                <p>Payment status, refunds, failed transfers, and timelines.</p>
+              </article>
+              <article>
+                <span>KYC</span>
+                <h3>Verification</h3>
+                <p>Mobile and DOB verification before sensitive account help.</p>
+              </article>
+              <article>
+                <span>ACC</span>
+                <h3>Account profile</h3>
+                <p>Nominee, customer profile, and support context.</p>
+              </article>
+            </div>
+          </div>
+
+          <section className="agent-precall__details" aria-label="Demo customer details">
+            <div className="agent-precall__details-heading">
+              <p className="agent-precall__eyebrow">Calling as</p>
+              <h2>{session.brief.name}</h2>
+              <p>{session.brief.customerId}</p>
+            </div>
+            <div className="agent-precall__detail-grid">
+              {buildPersonaDetailSections(session.persona).map((section) => (
+                <section key={section.id} className="agent-precall-detail">
+                  <h3>{section.title}</h3>
+                  <div className="agent-precall-detail__table-wrap">
+                    <table className="agent-precall-detail__table">
+                      <thead>
+                        <tr>
+                          {section.columns.map((column) => (
+                            <th key={column} scope="col">
+                              {column}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {section.rows.map((row) => (
+                          <tr key={row.id}>
+                            {row.cells.map((cell, index) => (
+                              <td key={`${row.id}-${section.columns[index]}`}>{cell}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ))}
+            </div>
+          </section>
+        </section>
+      </main>
+    );
+  }
+
   return (
-    <main
-      className={isPersonaPanelOpen ? 'agent-page agent-page--panel-open' : 'agent-page'}
-      style={{ ['--agent-sidebar-width' as string]: `${agentSidebarWidthPx}px` } as React.CSSProperties}
-    >
+    <main className="agent-page agent-page--call">
       <section className="voice-stage" aria-label="Voice call">
         <header className="voice-stage__header">
-          <button type="button" className="agent-icon-btn" onClick={() => history.back()} aria-label="Go back">
+          <button type="button" className="agent-icon-btn" onClick={handleBack} aria-label="Go back">
             <BackIcon />
           </button>
         </header>
@@ -2440,191 +2380,6 @@ export function AgentCallClient() {
           </div>
         </div>
       </section>
-
-      <button
-        type="button"
-        className="mobile-panel-handle"
-        aria-controls="agent-persona-panel"
-        aria-expanded={isPersonaPanelOpen}
-        aria-label="Show persona panel"
-        onClick={() => setIsPersonaPanelOpen(true)}
-      >
-        <ChevronLeftIcon />
-      </button>
-
-      <button
-        type="button"
-        className="mobile-panel-backdrop"
-        aria-label="Hide persona panel"
-        onClick={() => setIsPersonaPanelOpen(false)}
-      />
-
-      <aside className="persona-panel" id="agent-persona-panel" aria-label="Persona context">
-        <div
-          className="persona-panel__resize-edge"
-          role="separator"
-          aria-orientation="vertical"
-          aria-controls="agent-persona-panel"
-          aria-valuenow={agentSidebarWidthPx}
-          aria-valuemin={AGENT_SIDEBAR_WIDTH_MIN}
-          aria-valuemax={AGENT_SIDEBAR_WIDTH_MAX}
-          tabIndex={0}
-          aria-label="Resize persona and transcript panel. Drag sideways or use arrow keys when focused."
-          onPointerDown={onAgentSidebarResizePointerDown}
-          onPointerMove={onAgentSidebarResizePointerMove}
-          onPointerUp={endAgentSidebarResize}
-          onPointerCancel={endAgentSidebarResize}
-          onKeyDown={onAgentSidebarResizeKeyDown}
-        />
-        <div className="panel-tabs" role="tablist" aria-label="Agent panel">
-          <button
-            type="button"
-            className={activeTab === 'persona' ? 'panel-tab panel-tab--active' : 'panel-tab'}
-            onClick={() => setActiveTab('persona')}
-          >
-            Persona
-          </button>
-          <button
-            type="button"
-            className={activeTab === 'questions' ? 'panel-tab panel-tab--active' : 'panel-tab'}
-            onClick={() => setActiveTab('questions')}
-          >
-            Ask
-          </button>
-          <button
-            type="button"
-            className={activeTab === 'changePersona' ? 'panel-tab panel-tab--active' : 'panel-tab'}
-            onClick={() => setActiveTab('changePersona')}
-          >
-            Change
-          </button>
-        </div>
-
-        {activeTab === 'persona' ? (
-          <div className="panel-section">
-            <div className="persona-header">
-              <h2>{session.brief.name}</h2>
-              <p className="persona-customer-id">{session.brief.customerId}</p>
-            </div>
-            <div className="persona-detail-sections">
-              {buildPersonaDetailSections(session.persona).map((section) => (
-                <section key={section.id} className="persona-detail-section">
-                  <h3>{section.title}</h3>
-                  <div className="persona-detail-table-wrap">
-                    <table className="persona-detail-table">
-                      <thead>
-                        <tr>
-                          {section.columns.map((column) => (
-                            <th key={column} scope="col">
-                              {column}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {section.rows.map((row) => (
-                          <tr key={row.id}>
-                            {row.cells.map((cell, index) => (
-                              <td key={`${row.id}-${section.columns[index]}`}>{cell}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-              ))}
-            </div>
-          </div>
-        ) : activeTab === 'questions' ? (
-          <div className="panel-section">
-            <h2>Try asking</h2>
-            <p className="suggestion-panel-intro">
-              Each example lists the backend tools Stable Assist is expected to call for that kind of request.
-            </p>
-            <div className="suggestion-list">
-              {session.suggestions.map((suggestion) => (
-                <button
-                  key={suggestion.id}
-                  type="button"
-                  className="suggestion-btn"
-                  onClick={() => askAgent(suggestion.prompt)}
-                  disabled={callState === 'thinking' || callState === 'speaking'}
-                  aria-label={`${suggestion.label}. ${suggestion.prompt} Tools: ${suggestion.tools.join(', ')}.`}
-                >
-                  <span>{suggestion.label}</span>
-                  <small className="suggestion-prompt">{suggestion.prompt}</small>
-                  <small className="suggestion-tools">
-                    <span className="suggestion-tools-label">Tools</span>
-                    <span className="suggestion-tool-names">
-                      {suggestion.tools.length > 0 ? suggestion.tools.join(', ') : 'None'}
-                    </span>
-                  </small>
-                  <small className="suggestion-intent">Intent route: {suggestion.intent}</small>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="panel-section">
-            <h2>Change persona</h2>
-            <p className="persona-change-intro">Pick any demo customer. The call page will reload with that persona.</p>
-            <div className="persona-change-grid">
-              {PERSONAS.map((persona) => {
-                const isCurrent = session.persona.persona_id === persona.persona_id;
-                const isSubmitting = personaChangeSubmittingId === persona.persona_id;
-                return (
-                  <div
-                    key={persona.persona_id}
-                    className={`persona-card persona-change-card ${isCurrent ? 'persona-card--selected persona-change-card--current' : ''}`}
-                  >
-                    <div className="persona-card__body">
-                      <h3 className="persona-card__name">{persona.name}</h3>
-                      <button
-                        type="button"
-                        className="persona-card__details-btn"
-                        onClick={() => setDetailPersona(persona)}
-                        disabled={Boolean(personaChangeSubmittingId)}
-                      >
-                        View details
-                      </button>
-                      <span className="persona-change-card-status">
-                        {isSubmitting ? 'Changing...' : isCurrent ? 'Current persona' : 'Choose from details'}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            {personaChangeError ? <p className="persona-change-error">{personaChangeError}</p> : null}
-          </div>
-        )}
-
-        <div className="transcript-strip" ref={transcriptStripRef}>
-          {verificationStatus !== 'none' && (
-            <div className={`verification-badge verification-badge--${verificationStatus}`}>
-              {verificationStatus === 'checking' && 'Verifying identity...'}
-              {verificationStatus === 'mobile_matched' && 'Mobile verified — DOB needed'}
-              {verificationStatus === 'mobile_failed' && 'Mobile mismatch — try again'}
-              {verificationStatus === 'dob_failed' && 'DOB mismatch — try again'}
-              {verificationStatus === 'verified' && 'Identity verified'}
-            </div>
-          )}
-          {transcript.map((line, index) => (
-            <p key={`${line.role}-${index}`} className={`transcript-line transcript-line--${line.role}`}>
-              <strong>{line.role === 'agent' ? 'Stable Assist' : line.role === 'user' ? 'You' : 'System'}:</strong> {line.text}
-            </p>
-          ))}
-        </div>
-      </aside>
-      <PersonaDetailModal
-        persona={detailPersona}
-        onClose={() => setDetailPersona(null)}
-        onChoose={async (id) => {
-          setDetailPersona(null);
-          await changePersona(id);
-        }}
-      />
     </main>
   );
 }
