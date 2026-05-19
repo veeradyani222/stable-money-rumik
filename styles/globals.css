@@ -1,26 +1,31 @@
 :root {
   --primary:        #c9a87c;
   --primary-dark:   #b8936a;
+  --primary-light:  #ddc5a0;
   --gold-faint:     rgba(201, 168, 124, 0.15);
+  --gold-glow:      rgba(201, 168, 124, 0.25);
 
-  /* Sidebar — always dark (brand identity) */
   --sidebar-bg:     #1a0a2e;
   --sidebar-border: rgba(201, 168, 124, 0.12);
 
-  /* Main content — light */
   --bg:             #faf7ff;
-  --bg-dark:        #1a0a2e;
-  --bg-mid:         #2d1b4e;
-  --bg-light:       #3a2360;
+  --bg-dark:        #110820;
+  --bg-mid:         #1e0f38;
+  --bg-light:       #2d1954;
 
   --surface:        #ffffff;
-  --surface-raised: #f0ebff;
+  --surface-raised: #f5f0ff;
+  --surface-glass:  rgba(255, 255, 255, 0.06);
+  --surface-glass-border: rgba(255, 255, 255, 0.08);
 
   --text:           #1a0a2e;
   --text-muted:     #6b5f7a;
+  --text-on-dark:   #f0eaf8;
+  --text-on-dark-muted: rgba(240, 234, 248, 0.55);
   --border:         #e8e0f0;
 
   --card-shadow:    rgba(26, 10, 46, 0.08);
+  --card-shadow-lg: rgba(26, 10, 46, 0.16);
 
   --success:        #15803d;
   --danger:         #dc2626;
@@ -31,6 +36,11 @@
   --kapha:          #4d8c3f;
 
   --sidebar-width:  430px;
+
+  --radius-sm:      8px;
+  --radius-md:      14px;
+  --radius-lg:      22px;
+  --radius-xl:      28px;
 }
 
 *,
@@ -46,6 +56,8 @@ body {
   background: var(--bg);
   color: var(--text);
   transition: background 0.2s ease, color 0.2s ease;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 h1, h2, h3, h4, h5 {

@@ -8,9 +8,9 @@ const clientSource = fs.readFileSync(
   'utf8',
 );
 
-test('agent call client shows visualizer panel and transcript strip in the voice stage', () => {
+test('agent call client shows a focused visualizer-only voice stage', () => {
   assert.match(clientSource, /voice-call-visual-panel/);
   assert.match(clientSource, /AgentAudioVisualizerBar/);
-  assert.match(clientSource, /<div className="transcript-strip"/);
+  assert.doesNotMatch(clientSource, /<div className="transcript-strip"/);
   assert.match(clientSource, /voice-stage/);
 });

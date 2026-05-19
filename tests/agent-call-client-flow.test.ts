@@ -464,38 +464,68 @@ test('agent call client does not add internal connection status to the visible t
   assert.doesNotMatch(clientSource, /appendTranscript\('system', `Connected as/);
 });
 
-test('agent call client exposes an accessible mobile persona drawer handle and outside-close backdrop', () => {
-  assert.match(clientSource, /const \[isPersonaPanelOpen, setIsPersonaPanelOpen\] = useState\(false\);/);
-  assert.match(clientSource, /className="mobile-panel-handle"/);
-  assert.match(clientSource, /className="mobile-panel-backdrop"/);
-  assert.match(clientSource, /aria-controls="agent-persona-panel"/);
-  assert.match(clientSource, /aria-expanded=\{isPersonaPanelOpen\}/);
-  assert.match(clientSource, /setIsPersonaPanelOpen\(true\)/);
-  assert.match(clientSource, /setIsPersonaPanelOpen\(false\)/);
-  assert.doesNotMatch(clientSource, /className="mobile-panel-toggle"/);
-  assert.doesNotMatch(clientSource, /className="mobile-panel-close"/);
+test('agent call client renders a pre-call intro instead of the side panel shell', () => {
+  assert.match(clientSource, /const \[hasEnteredCall, setHasEnteredCall\] = useState\(false\);/);
+  assert.match(clientSource, /className="agent-precall"/);
+  assert.match(clientSource, /Stable Money Support/);
+  assert.match(clientSource, /Call Stable Money Support/);
+  assert.match(clientSource, /onClick=\{\(\) => void enterCall\(\)\}/);
+  assert.match(clientSource, /buildPersonaDetailSections\(session\.persona\)\.map/);
+  assert.doesNotMatch(clientSource, /className="mobile-panel-handle"/);
+  assert.doesNotMatch(clientSource, /className="mobile-panel-backdrop"/);
+  assert.doesNotMatch(clientSource, /className="persona-panel"/);
+  assert.doesNotMatch(clientSource, /className="panel-tabs"/);
 });
 
-test('agent call client offers persona switching from the side panel and reloads the active call', () => {
-  assert.match(clientSource, /import \{ PERSONAS \} from '@\/lib\/personas';/);
-  assert.match(clientSource, /import \{ PersonaDetailModal \} from '@\/components\/onboarding\/PersonaDetailModal';/);
-  assert.match(clientSource, /type PanelTab = 'persona' \| 'questions' \| 'changePersona';/);
-  assert.match(clientSource, /const \[personaChangeError, setPersonaChangeError\] = useState\(''\);/);
-  assert.match(clientSource, /const \[personaChangeSubmittingId, setPersonaChangeSubmittingId\] = useState<string \| null>\(null\);/);
-  assert.match(clientSource, /const \[detailPersona, setDetailPersona\] = useState<PersonaSeed \| null>\(null\);/);
-  assert.match(clientSource, /fetch\('\/api\/onboarding\/select-persona'/);
-  assert.match(clientSource, /body: JSON\.stringify\(\{ session_id: session\.session_id, persona_id: personaId \}\)/);
-  assert.match(clientSource, /window\.location\.assign\(`\/agent\?session_id=\$\{encodeURIComponent\(session\.session_id\)\}`\)/);
-  assert.match(clientSource, /activeTab === 'changePersona'/);
-  assert.match(clientSource, /Change persona/);
-  assert.match(clientSource, /PERSONAS\.map\(\(persona\) =>/);
-  assert.match(clientSource, /className=\{`persona-card persona-change-card/);
-  assert.match(clientSource, /className="persona-card__body"/);
-  assert.match(clientSource, /className="persona-card__name"/);
-  assert.match(clientSource, /className="persona-card__details-btn"/);
-  assert.match(clientSource, /onClick=\{\(\) => setDetailPersona\(persona\)\}/);
-  assert.match(clientSource, /<PersonaDetailModal/);
-  assert.match(clientSource, /await changePersona\(id\);/);
+test('agent call client enters the existing startCall flow from the pre-call button', () => {
+  const enterCallIndex = clientSource.indexOf('const enterCall = useCallback');
+  const setEnteredIndex = clientSource.indexOf('setHasEnteredCall(true);', enterCallIndex);
+  const startIndex = clientSource.indexOf('await startCall();', setEnteredIndex);
+  const startCallIndex = clientSource.indexOf('const startCall = useCallback');
+
+  assert.notEqual(enterCallIndex, -1);
+  assert.notEqual(setEnteredIndex, -1);
+  assert.notEqual(startIndex, -1);
+  assert.notEqual(startCallIndex, -1);
+  assert.ok(startCallIndex < enterCallIndex);
+  assert.ok(enterCallIndex < setEnteredIndex);
+  assert.ok(setEnteredIndex < startIndex);
+});
+
+test('agent call client back button returns from active call to pre-call screen first', () => {
+  const backHandlerIndex = clientSource.indexOf('const handleBack = useCallback');
+  const activeCallBranchIndex = clientSource.indexOf('if (hasEnteredCall)', backHandlerIndex);
+  const resetCallViewIndex = clientSource.indexOf('setHasEnteredCall(false);', activeCallBranchIndex);
+  const historyBranchIndex = clientSource.indexOf('window.history.back();', resetCallViewIndex);
+  const preCallButtonIndex = clientSource.indexOf('onClick={handleBack}', clientSource.indexOf('agent-page--precall'));
+  const callButtonIndex = clientSource.indexOf('onClick={handleBack}', clientSource.indexOf('agent-page--call'));
+
+  assert.notEqual(backHandlerIndex, -1);
+  assert.notEqual(activeCallBranchIndex, -1);
+  assert.notEqual(resetCallViewIndex, -1);
+  assert.notEqual(historyBranchIndex, -1);
+  assert.notEqual(preCallButtonIndex, -1);
+  assert.notEqual(callButtonIndex, -1);
+  assert.ok(backHandlerIndex < activeCallBranchIndex);
+  assert.ok(activeCallBranchIndex < resetCallViewIndex);
+  assert.ok(resetCallViewIndex < historyBranchIndex);
+});
+
+test('agent call client falls back to onboarding when no browser history exists', () => {
+  assert.match(clientSource, /import \{ useRouter, useSearchParams \} from 'next\/navigation';/);
+  assert.match(clientSource, /const router = useRouter\(\);/);
+  assert.match(clientSource, /if \(window\.history\.length > 1\)/);
+  assert.match(clientSource, /router\.push\('\/onboarding'\);/);
+});
+
+test('agent call client does not render persona switching in the call UI', () => {
+  assert.doesNotMatch(clientSource, /import \{ PersonaDetailModal \} from '@\/components\/onboarding\/PersonaDetailModal';/);
+  assert.doesNotMatch(clientSource, /const \[detailPersona, setDetailPersona\] = useState<PersonaSeed \| null>\(null\);/);
+  assert.doesNotMatch(clientSource, /activeTab === 'changePersona'/);
+  assert.doesNotMatch(clientSource, /Change persona/);
+  assert.doesNotMatch(clientSource, /PERSONAS\.map\(\(persona\) =>/);
+  assert.doesNotMatch(clientSource, /className=\{`persona-card persona-change-card/);
+  assert.doesNotMatch(clientSource, /persona-change-card-status/);
 });
 
 test('agent call client starts a fresh microphone recorder after confirmed speech', () => {
